@@ -1,0 +1,8 @@
+bucket_raw: raw
+sp500_file: sp500_combined.csv
+db_host: localhost
+db_user: root
+db_password: root
+mongo_uri: mongodb://localhost:27017/
+window_size: 30
+endpoint_url: http://localhost:4566

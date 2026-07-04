@@ -1,0 +1,9 @@
+boto3
+pandas
+numpy
+numba
+mysql-connector-python
+pymongo
+yfinance==0.2.40
+multitasking==0.0.11
+requests

@@ -1,0 +1,50 @@
+vars:
+  - params.yaml
+
+stages:
+  unpack_to_raw:
+    cmd: >
+      python build/unpack_to_raw.py
+      --input_dir data/kaggle_sp500
+      --bucket_name ${bucket_raw}
+      --output_file_name ${sp500_file}
+      --endpoint-url ${endpoint_url}
+    deps:
+      - build/unpack_to_raw.py
+      - params.yaml
+    outs:
+      - data/kaggle_sp500
+
+  fetch_market_mood:
+    cmd: >
+      python src/ingestion/market_api.py
+      --bucket_name ${bucket_raw}
+      --endpoint-url ${endpoint_url}
+    deps:
+      - src/ingestion/market_api.py
+      - params.yaml
+
+  preprocess_to_staging:
+    cmd: >
+      python src/transform/preprocess_to_staging.py
+      --bucket_raw ${bucket_raw}
+      --sp500_file ${sp500_file}
+      --db_host ${db_host}
+      --db_user ${db_user}
+      --db_password ${db_password}
+      --endpoint-url ${endpoint_url}
+    deps:
+      - src/transform/preprocess_to_staging.py
+      - params.yaml
+
+  process_to_curated:
+    cmd: >
+      python src/transform/process_to_curated.py
+      --mysql_host ${db_host}
+      --mysql_user ${db_user}
+      --mysql_password ${db_password}
+      --mongo_uri ${mongo_uri}
+      --window_size ${window_size}
+    deps:
+      - src/transform/process_to_curated.py
+      - params.yaml

@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pydantic
+boto3
+mysql-connector-python
+pymongo
+numpy
+numba

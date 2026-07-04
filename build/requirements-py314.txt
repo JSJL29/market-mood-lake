@@ -1,0 +1,17 @@
+boto3
+pandas
+numpy
+numba
+scikit-learn
+matplotlib
+ipykernel
+mysql-connector-python
+pymongo
+yfinance
+requests
+fastapi
+uvicorn
+pydantic
+dvc
+torch
+tqdm
