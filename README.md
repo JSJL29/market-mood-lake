@@ -89,13 +89,6 @@ source ~/market-mood-lake-venv/bin/activate
 python -m pip install -r build/requirements.txt   # ou requirements-py314.txt
 ```
 
-Téléchargez le dataset S&P500 (indice unique) depuis Kaggle et placez le
-CSV dans `data/kaggle_sp500/`. Pour la version cross-sectional
-(optionnelle, voir 3.5.2), téléchargez aussi un dataset multi-actions
-(ex: [S&P 500 OHCLV Stock Data](https://www.kaggle.com/datasets/jacksaleeby/s-and-p500-historical-data),
-colonnes `Ticker,Date,Open,High,Low,Close,Adj Close,Volume`) dans
-`data/kaggle_stocks/`.
-
 Lancez les services :
 
 ```bash
