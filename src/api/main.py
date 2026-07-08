@@ -1,10 +1,11 @@
-from fastapi import FastAPI, HTTPException, Query
-from typing import List, Optional
-import boto3
-import json
-import mysql.connector
-from pymongo import MongoClient
+import os
 from datetime import datetime
+from typing import List, Optional
+
+import boto3
+import mysql.connector
+from fastapi import FastAPI, HTTPException, Query
+from pymongo import MongoClient
 
 from src.api.routes_ingest import router as ingest_router
 
@@ -14,38 +15,48 @@ app.include_router(ingest_router)
 
 class DatabaseConnections:
     def __init__(self):
-        # S3 (LocalStack)
         self.s3_client = boto3.client(
-            's3',
-            endpoint_url='http://localstack:4566'
+            "s3",
+            endpoint_url=os.getenv("S3_ENDPOINT_URL", "http://localstack:4566"),
         )
-
-        # MySQL
         self.mysql_config = {
-            'host': 'mysql',
-            'user': 'root',
-            'password': 'root',
-            'database': 'staging'
+            "host": os.getenv("MYSQL_HOST", "mysql"),
+            "user": os.getenv("MYSQL_USER", "root"),
+            "password": os.getenv("MYSQL_PASSWORD", "root"),
+            "database": os.getenv("MYSQL_DATABASE", "staging"),
         }
-
-        # MongoDB
-        self.mongo_uri = 'mongodb://mongodb:27017/'
+        self.mongo_uri = os.getenv("MONGO_URI", "mongodb://mongodb:27017/")
         self.mongo_client = MongoClient(self.mongo_uri)
-        self.mongo_db = self.mongo_client['curated']
+        self.mongo_db = self.mongo_client[os.getenv("MONGO_DB", "curated")]
 
 
 db = DatabaseConnections()
 
 
+def _iso(value):
+    return value.isoformat() if hasattr(value, "isoformat") else value
+
+
+def _mysql_scalar(query: str, params=None):
+    conn = mysql.connector.connect(**db.mysql_config)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(query, params or [])
+        row = cursor.fetchone()
+        return row[0] if row else None
+    finally:
+        try:
+            cursor.close()
+        finally:
+            conn.close()
+
+
 @app.get("/raw/", response_model=List[dict])
 async def get_raw_data(
     bucket: Optional[str] = Query("raw", description="Nom du bucket S3"),
-    limit: Optional[int] = Query(10, description="Nombre maximum d'objets à lister"),
+    limit: Optional[int] = Query(10, ge=1, le=1000, description="Nombre maximum d'objets à lister"),
 ):
-    """
-    Liste les objets disponibles dans le bucket raw (S3) et retourne
-    leurs métadonnées (clé, taille, date de dernière modification).
-    """
+    """Liste les objets disponibles dans la zone raw S3."""
     try:
         response = db.s3_client.list_objects_v2(Bucket=bucket)
         contents = response.get("Contents", [])[:limit]
@@ -57,141 +68,188 @@ async def get_raw_data(
             }
             for obj in contents
         ]
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur lors de la lecture depuis S3: {str(e)}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la lecture depuis S3: {exc}")
 
 
 @app.get("/staging/", response_model=List[dict])
 async def get_staging_data(
-    start_date: Optional[str] = Query(None, description="Date de début (YYYY-MM-DD)"),
-    end_date: Optional[str] = Query(None, description="Date de fin (YYYY-MM-DD)"),
-    limit: Optional[int] = Query(100, description="Nombre maximum de lignes"),
+    start_date: Optional[str] = Query(None, description="Date de début YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="Date de fin YYYY-MM-DD"),
+    limit: Optional[int] = Query(100, ge=1, le=5000, description="Nombre maximum de lignes"),
+    table: Optional[str] = Query("market_data", description="market_data ou market_data_xs"),
 ):
-    """
-    Récupère les données marché (S&P500 + VIX + Fear&Greed) depuis MySQL.
-    """
+    """Récupère les données staging depuis MySQL."""
+    if table not in {"market_data", "market_data_xs"}:
+        raise HTTPException(status_code=400, detail="table doit valoir market_data ou market_data_xs")
+
     try:
         conn = mysql.connector.connect(**db.mysql_config)
         cursor = conn.cursor(dictionary=True)
-
-        query = "SELECT * FROM market_data WHERE 1=1"
+        query = f"SELECT * FROM {table} WHERE 1=1"
         params = []
-
         if start_date:
             query += " AND date >= %s"
             params.append(start_date)
-
         if end_date:
             query += " AND date <= %s"
             params.append(end_date)
-
         query += " ORDER BY date DESC LIMIT %s"
         params.append(limit)
-
         cursor.execute(query, params)
         rows = cursor.fetchall()
-
         cursor.close()
         conn.close()
-
         for row in rows:
-            if 'date' in row and hasattr(row['date'], 'isoformat'):
-                row['date'] = row['date'].isoformat()
-            if 'created_at' in row and hasattr(row['created_at'], 'isoformat'):
-                row['created_at'] = row['created_at'].isoformat()
-
+            for key, value in list(row.items()):
+                row[key] = _iso(value)
         return rows
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur lors de la lecture depuis MySQL: {str(e)}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la lecture depuis MySQL: {exc}")
 
 
 @app.get("/curated/", response_model=List[dict])
 async def get_curated_data(
-    limit: Optional[int] = Query(10, description="Nombre maximum de séquences à retourner"),
-    label: Optional[int] = Query(None, description="Filtrer par label (1=hausse, 0=baisse)"),
+    limit: Optional[int] = Query(10, ge=1, le=1000, description="Nombre maximum de documents à retourner"),
+    label: Optional[int] = Query(None, description="Filtrer par label 1=hausse, 0=baisse"),
+    collection: Optional[str] = Query("market_sequences", description="Collection MongoDB curated"),
 ):
-    """
-    Récupère les séquences fenêtrées prêtes pour le RNN depuis MongoDB.
-    """
+    """Récupère des documents curated depuis MongoDB."""
+    allowed = {"market_sequences", "market_sequences_xs", "model_runs", "benchmark_runs"}
+    if collection not in allowed:
+        raise HTTPException(status_code=400, detail=f"collection doit être dans {sorted(allowed)}")
     try:
-        collection = db.mongo_db.market_sequences
-
         query = {}
-        if label is not None:
+        if label is not None and collection.startswith("market_sequences"):
             query["label"] = label
-
-        docs = list(collection.find(query, {'_id': 0}).limit(limit))
+        docs = list(
+            db.mongo_db[collection]
+            .find(query, {"_id": 0})
+            .sort("created_at", -1)
+            .limit(limit)
+        )
+        # Fallback utile pour la démo : si les séquences curated sont vides,
+        # on expose les derniers résultats ML stockés dans model_runs.
+        if not docs and collection == "market_sequences" and label is None:
+            docs = list(
+                db.mongo_db["model_runs"]
+                .find({}, {"_id": 0})
+                .sort("created_at", -1)
+                .limit(limit)
+            )
         return docs
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur lors de la lecture depuis MongoDB: {str(e)}")
-
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la lecture depuis MongoDB: {exc}")
 
 @app.get("/health")
 async def health_check():
-    """
-    Vérifie la santé de l'API et des connexions aux services (S3, MySQL, MongoDB).
-    """
+    """Vérifie l'état de l'API et des connexions aux services."""
     status = {
         "api_status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "connections": {}
+        "connections": {},
     }
-
     try:
         db.s3_client.list_buckets()
         status["connections"]["s3"] = True
-    except Exception:
+    except Exception as exc:
         status["connections"]["s3"] = False
+        status["connections"]["s3_error"] = str(exc)
 
     try:
         conn = mysql.connector.connect(**db.mysql_config)
         conn.close()
         status["connections"]["mysql"] = True
-    except Exception:
+    except Exception as exc:
         status["connections"]["mysql"] = False
+        status["connections"]["mysql_error"] = str(exc)
 
     try:
         db.mongo_client.server_info()
         status["connections"]["mongodb"] = True
-    except Exception:
+    except Exception as exc:
         status["connections"]["mongodb"] = False
+        status["connections"]["mongodb_error"] = str(exc)
 
     return status
 
 
 @app.get("/stats")
 async def stats():
-    """
-    Métriques sur le remplissage des buckets et bases de données.
-    """
-    result = {"timestamp": datetime.now().isoformat()}
+    """Métriques de remplissage raw/staging/curated + derniers runs ML/benchmarks."""
+    result = {
+        "timestamp": datetime.now().isoformat(),
+        "raw": {},
+        "staging": {},
+        "curated": {},
+        "ml": {},
+        "benchmarks": {},
+        "errors": {},
+    }
 
     try:
         response = db.s3_client.list_objects_v2(Bucket="raw")
-        result["raw_object_count"] = response.get("KeyCount", 0)
-    except Exception as e:
-        result["raw_object_count"] = f"error: {e}"
+        objects = response.get("Contents", [])
+        latest = max(objects, key=lambda obj: obj["LastModified"]) if objects else None
+        result["raw"] = {
+            "object_count": len(objects),
+            "total_size_bytes": int(sum(obj.get("Size", 0) for obj in objects)),
+            "latest_object": None
+            if latest is None
+            else {
+                "key": latest["Key"],
+                "size_bytes": latest["Size"],
+                "last_modified": latest["LastModified"].isoformat(),
+            },
+        }
+    except Exception as exc:
+        result["raw"] = {"error": str(exc)}
+
+    for table in ["market_data", "market_data_xs"]:
+        try:
+            row_count = _mysql_scalar(f"SELECT COUNT(*) FROM {table}")
+            min_date = _mysql_scalar(f"SELECT MIN(date) FROM {table}")
+            max_date = _mysql_scalar(f"SELECT MAX(date) FROM {table}")
+            result["staging"][table] = {
+                "row_count": int(row_count or 0),
+                "min_date": _iso(min_date),
+                "max_date": _iso(max_date),
+            }
+        except Exception as exc:
+            result["staging"][table] = {"error": str(exc)}
+
+    for collection in ["market_sequences", "market_sequences_xs", "model_runs", "benchmark_runs"]:
+        try:
+            result["curated"][collection] = {
+                "document_count": db.mongo_db[collection].count_documents({})
+            }
+        except Exception as exc:
+            result["curated"][collection] = {"error": str(exc)}
 
     try:
-        conn = mysql.connector.connect(**db.mysql_config)
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM market_data")
-        result["staging_row_count"] = cursor.fetchone()[0]
-        cursor.close()
-        conn.close()
-    except Exception as e:
-        result["staging_row_count"] = f"error: {e}"
+        latest_run = db.mongo_db.model_runs.find_one({}, {"_id": 0}, sort=[("created_at", -1)])
+        result["ml"]["latest_model_run"] = latest_run
+    except Exception as exc:
+        result["ml"]["error"] = str(exc)
 
     try:
-        result["curated_document_count"] = db.mongo_db.market_sequences.count_documents({})
-    except Exception as e:
-        result["curated_document_count"] = f"error: {e}"
+        latest_benchmark = db.mongo_db.benchmark_runs.find_one({}, {"_id": 0}, sort=[("created_at", -1)])
+        result["benchmarks"]["latest_benchmark_run"] = latest_benchmark
+    except Exception as exc:
+        result["benchmarks"]["error"] = str(exc)
+
+    for collection in ["ingestion_errors", "data_quality_logs"]:
+        try:
+            count = db.mongo_db[collection].count_documents({})
+            latest_error = db.mongo_db[collection].find_one({}, {"_id": 0}, sort=[("created_at", -1)])
+            result["errors"][collection] = {"count": count, "latest": latest_error}
+        except Exception as exc:
+            result["errors"][collection] = {"error": str(exc)}
 
     return result
 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
