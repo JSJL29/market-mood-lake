@@ -15,7 +15,7 @@ services:
       - AWS_DEFAULT_REGION=us-east-1
     volumes:
       - localstack_data:/var/lib/localstack
-      - ./scripts/localstack-init.sh:/etc/localstack/init/ready.d/10-init-raw.sh:ro
+      - ./scripts/localstack_init.py:/etc/localstack/init/ready.d/10-init-raw.py:ro
       - ./data/kaggle_stocks/SP500_Historical_Data.csv:/bootstrap/SP500_Historical_Data.csv:ro
 
   mysql:

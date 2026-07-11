@@ -31,14 +31,15 @@ Deux modes de données sont disponibles :
 
 ## 2. Périmètre d'automatisation
 
-Le pipeline Airflow acquiert désormais explicitement le dataset historique. Il réutilise le
-fichier local s'il existe ou le télécharge depuis `HISTORICAL_DATA_URL`. Sans l'un de ces deux
-moyens d'accès, il s'arrête avec un message explicite : le dépôt ne contient volontairement ni
-dataset propriétaire, ni identifiants Kaggle.
+Le pipeline Airflow acquiert explicitement le dataset historique. Il réutilise le fichier local,
+le télécharge depuis `HISTORICAL_DATA_URL`, ou génère en dernier recours un petit dataset de
+démonstration déterministe. Une machine neuve peut donc exécuter le projet sans compte Kaggle.
+Le fallback sert à valider l'infrastructure ; les résultats ML publiables doivent utiliser la
+source historique complète.
 
 | Étape | Statut | Responsable |
 |---|---:|---|
-| Acquisition du dataset historique | Automatique si `HISTORICAL_DATA_URL` est défini, sinon fichier local | Airflow |
+| Acquisition du dataset historique | Automatique : fichier, URL, puis fallback de démonstration | Airflow / DVC |
 | Vérification du CSV source | Automatique | Airflow / DVC |
 | Création du bucket `raw` | Automatique | Airflow |
 | Génération de `sp500_combined.csv` | Automatique | Airflow / DVC |
@@ -55,12 +56,25 @@ Pour une exécution hors ligne, le fichier attendu est :
 data/kaggle_stocks/SP500_Historical_Data.csv
 ```
 
-Le fichier CSV n'est pas versionné dans Git. Pour une exécution entièrement automatique sur une
-machine neuve, définir avant le démarrage :
+Le fichier CSV n'est pas versionné dans Git mais devient une sortie DVC. Pour imposer une vraie
+source sur une machine neuve, définir avant le démarrage :
 
 ```bash
 export HISTORICAL_DATA_URL="https://.../SP500_Historical_Data.csv"
 ```
+
+Sans cette variable, le fallback hors ligne est créé automatiquement. L'option
+`--no-demo-fallback` permet aux exécutions de production d'échouer si la vraie source manque.
+
+Avant toute exécution, le correcteur peut diagnostiquer son environnement avec une seule commande :
+
+```bash
+python scripts/doctor.py
+```
+
+Prévoir environ 10 Gio libres pour un premier build Docker (Airflow et PyTorch sont volumineux).
+Une installation déjà construite est acceptée par le diagnostic à partir de 0,5 Gio, mais libérer
+davantage d'espace reste recommandé.
 
 ---
 
@@ -356,21 +370,19 @@ La voie DVC est cross-sectional et volontairement bornée par défaut à 50 tick
 `params.yaml`). Le DAG Airflow principal construit, lui, un proxy de marché
 équipondéré mono-série.
 
-Les sorties métiers sont stockées dans S3, MySQL et MongoDB. Elles ne sont donc pas des fichiers DVC classiques.
-
-Pour rendre l'ordre explicite, chaque étape produit un fichier d'état dans :
+Les bases restent les supports d'exécution, mais leur contenu utile est maintenant exporté sous
+forme d'artefacts déterministes réellement suivis par DVC :
 
 ```text
-data/.pipeline_state/
+data/kaggle_stocks/SP500_Historical_Data.csv
+data/versioned_snapshots/market_data_xs.csv.gz
+data/versioned_snapshots/market_sequences_xs.jsonl.gz
 ```
 
-Les stages utilisent `always_changed: true` afin que `dvc repro` reconstruise réellement le pipeline externe, même si les scripts locaux n'ont pas changé.
-
-Ajouter à `.gitignore` :
-
-```gitignore
-data/.pipeline_state/
-```
+Les snapshots gzip ont un en-tête stable (`mtime=0`), un tri stable et un contenu canonique. DVC
+peut ainsi mettre en cache, restaurer et comparer les données MySQL/MongoDB, et pas seulement un
+fichier d'état. `always_changed` ne subsiste que sur les étapes qui interrogent ou publient un
+système externe mutable (S3/API), pas sur le versionnement des bases.
 
 Les paramètres locaux sont centralisés dans :
 

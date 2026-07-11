@@ -7,9 +7,16 @@ def test_existing_historical_file_is_reused(tmp_path):
     assert acquire(destination) == "existing"
 
 
+def test_missing_source_generates_offline_demo(tmp_path):
+    destination = tmp_path / "historical.csv"
+    assert acquire(destination) == "generated-demo"
+    assert destination.stat().st_size > 0
+    assert destination.read_text(encoding="utf-8").splitlines()[0].startswith("ticker,date,")
+
+
 def test_missing_source_has_actionable_error(tmp_path):
     try:
-        acquire(tmp_path / "missing.csv")
+        acquire(tmp_path / "missing.csv", allow_demo_fallback=False)
     except FileNotFoundError as exc:
         assert "HISTORICAL_DATA_URL" in str(exc)
     else:

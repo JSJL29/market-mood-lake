@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from datetime import date, timedelta
 import os
 from pathlib import Path
 from typing import Optional
@@ -28,10 +29,45 @@ def _validate_csv(path: Path) -> None:
             raise ValueError("Historical CSV contains no data rows")
 
 
-def acquire(destination: Path, source_url: Optional[str] = None) -> str:
+def _write_demo_dataset(destination: Path, days: int = 520) -> None:
+    """Create a deterministic, offline-capable dataset for evaluation/dev."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".part")
+    start = date(2022, 1, 3)
+    tickers = ("SPY", "QQQ", "DIA")
+    with temporary.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["ticker", "date", "open", "high", "low", "close", "volume"])
+        for ticker_index, ticker in enumerate(tickers):
+            price = 100.0 + 20 * ticker_index
+            written = 0
+            current = start
+            while written < days:
+                if current.weekday() < 5:
+                    drift = 0.0004 + (((written + ticker_index * 7) % 17) - 8) / 10000
+                    open_price = price
+                    price *= 1 + drift
+                    writer.writerow(
+                        [ticker, current.isoformat(), f"{open_price:.4f}", f"{price * 1.003:.4f}",
+                         f"{price * 0.997:.4f}", f"{price:.4f}", 1_000_000 + written * 100]
+                    )
+                    written += 1
+                current += timedelta(days=1)
+    _validate_csv(temporary)
+    temporary.replace(destination)
+
+
+def acquire(
+    destination: Path,
+    source_url: Optional[str] = None,
+    allow_demo_fallback: bool = True,
+) -> str:
     if destination.is_file() and destination.stat().st_size > 0:
         _validate_csv(destination)
         return "existing"
+    if not source_url and allow_demo_fallback:
+        _write_demo_dataset(destination)
+        return "generated-demo"
     if not source_url:
         raise FileNotFoundError(
             f"Historical dataset missing: {destination}. Set HISTORICAL_DATA_URL "
@@ -61,8 +97,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--destination", type=Path, required=True)
     parser.add_argument("--source-url", default=os.getenv("HISTORICAL_DATA_URL"))
+    parser.add_argument(
+        "--no-demo-fallback", action="store_true",
+        help="Fail instead of generating the deterministic offline demo dataset",
+    )
     args = parser.parse_args()
-    print(f"Historical dataset: {acquire(args.destination, args.source_url)}")
+    print(
+        f"Historical dataset: {acquire(args.destination, args.source_url, not args.no_demo_fallback)}"
+    )
 
 
 if __name__ == "__main__":

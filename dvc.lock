@@ -11,20 +11,16 @@ stages:
     deps:
     - path: build/unpack_to_raw.py
       hash: md5
-      md5: 0d6acc530247e913efa48336a0eadd94
-      size: 4570
-    - path: data/.pipeline_state/source_ready.txt
-      hash: md5
-      md5: f5ec1174a306482ed5578a0c48b9de4a
-      size: 21
+      md5: 40327ca460a5f5089f85e9718736014d
+      size: 4673
     - path: data/kaggle_stocks/SP500_Historical_Data.csv
       hash: md5
-      md5: a0f2a6ac2d0cae50ab3fa2bf70c68ee4
-      size: 142643767
+      md5: 85f54581466575fad013033a04ee2916
+      size: 93611
     - path: params.yaml
       hash: md5
-      md5: aa19534d81ade9569bfd350f1d1c6aff
-      size: 580
+      md5: 35f3f00031e61ae40af1f39fb6105adc
+      size: 606
     - path: scripts/create_raw_bucket.py
       hash: md5
       md5: 13135ddbc75d3d3ca75303125fac5730
@@ -32,7 +28,7 @@ stages:
     outs:
     - path: data/.pipeline_state/raw_ready.txt
       hash: md5
-      md5: 345623517d12a16d4137df73fc69f2d6
+      md5: 65d6a869ec3a861ac37563f9541dbd31
       size: 21
       isexec: true
   fetch_market_mood:
@@ -42,20 +38,20 @@ stages:
     deps:
     - path: data/.pipeline_state/raw_ready.txt
       hash: md5
-      md5: 345623517d12a16d4137df73fc69f2d6
+      md5: 65d6a869ec3a861ac37563f9541dbd31
       size: 21
     - path: params.yaml
       hash: md5
-      md5: aa19534d81ade9569bfd350f1d1c6aff
-      size: 580
+      md5: 35f3f00031e61ae40af1f39fb6105adc
+      size: 606
     - path: src/ingestion/market_api.py
       hash: md5
-      md5: 1822f2600e69fce47a7fd5a2b638545f
-      size: 6568
+      md5: e423c573690c7fa7c30e164b307cb7ba
+      size: 6735
     outs:
     - path: data/.pipeline_state/market_mood_ready.txt
       hash: md5
-      md5: 71f53ed5bdbd273ffd88f6e92e2589b8
+      md5: 19af3e348e35e5b3412f4a80a3d64901
       size: 21
       isexec: true
   preprocess_to_staging:
@@ -119,74 +115,83 @@ stages:
     cmd: "export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1
       && python -m src.transform.preprocess_to_staging_xs --bucket_raw raw --stocks_file
       sp500_combined.csv --db_host localhost --db_user root --db_password root --endpoint-url
-      http://localhost:4566 --horizon 1 --max_tickers 50 && date -u +\"%Y-%m-%dT%H:%M:%SZ\"\
-      \ > data/.pipeline_state/staging_xs_ready.txt\n"
+      http://localhost:4566 --horizon 1 --max_tickers 50 && python scripts/snapshot_databases.py
+      --kind mysql --mysql-host localhost --mysql-user root --mysql-password root
+      --table market_data_xs --output data/versioned_snapshots/market_data_xs.csv.gz\n"
     deps:
     - path: data/.pipeline_state/market_mood_ready.txt
       hash: md5
-      md5: 71f53ed5bdbd273ffd88f6e92e2589b8
+      md5: 19af3e348e35e5b3412f4a80a3d64901
       size: 21
     - path: data/.pipeline_state/raw_ready.txt
       hash: md5
-      md5: 345623517d12a16d4137df73fc69f2d6
+      md5: 65d6a869ec3a861ac37563f9541dbd31
       size: 21
     - path: params.yaml
       hash: md5
-      md5: aa19534d81ade9569bfd350f1d1c6aff
-      size: 580
+      md5: 35f3f00031e61ae40af1f39fb6105adc
+      size: 606
+    - path: scripts/snapshot_databases.py
+      hash: md5
+      md5: 8e5a0e62983fafd2d3bfc739e9b11bf0
+      size: 3188
     - path: src/transform/preprocess_to_staging.py
       hash: md5
-      md5: ae20d7edd5062a05b54cc6908ea4dda5
-      size: 14736
+      md5: 59cf12229d47686c2a604d28ea3d0516
+      size: 15098
     - path: src/transform/preprocess_to_staging_xs.py
       hash: md5
-      md5: 12891b293efd1d839c8e2ec1243a7236
-      size: 22221
+      md5: fe93cfa0505316d29ba71b9814d897f1
+      size: 22359
     outs:
-    - path: data/.pipeline_state/staging_xs_ready.txt
+    - path: data/versioned_snapshots/market_data_xs.csv.gz
       hash: md5
-      md5: f930e581e939dc3620195d4137b02113
-      size: 21
+      md5: c5ab281c033003cf12ba95daacefc167
+      size: 98154
       isexec: true
   acquire_historical_source:
-    cmd: "mkdir -p data/.pipeline_state && python scripts/acquire_historical_data.py
-      --destination data/kaggle_stocks/SP500_Historical_Data.csv && date -u +\"%Y-%m-%dT%H:%M:%SZ\"\
-      \ > data/.pipeline_state/source_ready.txt\n"
+    cmd: "python scripts/acquire_historical_data.py --destination data/kaggle_stocks/SP500_Historical_Data.csv\n"
     deps:
     - path: params.yaml
       hash: md5
-      md5: aa19534d81ade9569bfd350f1d1c6aff
-      size: 580
+      md5: 35f3f00031e61ae40af1f39fb6105adc
+      size: 606
     - path: scripts/acquire_historical_data.py
       hash: md5
-      md5: 267c36be0166a2a9175acd0f51670326
-      size: 2858
+      md5: 4553a88151476db885ebf83ce9792d9e
+      size: 4653
     outs:
-    - path: data/.pipeline_state/source_ready.txt
+    - path: data/kaggle_stocks/SP500_Historical_Data.csv
       hash: md5
-      md5: f5ec1174a306482ed5578a0c48b9de4a
-      size: 21
+      md5: 85f54581466575fad013033a04ee2916
+      size: 93611
       isexec: true
   process_to_curated_xs:
     cmd: "python -m src.transform.process_to_curated_xs --mysql_host localhost --mysql_user
       root --mysql_password root --mongo_uri mongodb://localhost:27017/ --window_size
-      30 --max_sequences_per_ticker 1000 && date -u +\"%Y-%m-%dT%H:%M:%SZ\" > data/.pipeline_state/curated_xs_ready.txt\n"
+      30 --max_sequences_per_ticker 1000 && python scripts/snapshot_databases.py --kind
+      mongo --mongo-uri mongodb://localhost:27017/ --collection market_sequences_xs
+      --output data/versioned_snapshots/market_sequences_xs.jsonl.gz\n"
     deps:
-    - path: data/.pipeline_state/staging_xs_ready.txt
+    - path: data/versioned_snapshots/market_data_xs.csv.gz
       hash: md5
-      md5: f930e581e939dc3620195d4137b02113
-      size: 21
+      md5: c5ab281c033003cf12ba95daacefc167
+      size: 98154
     - path: params.yaml
       hash: md5
-      md5: aa19534d81ade9569bfd350f1d1c6aff
-      size: 580
+      md5: 35f3f00031e61ae40af1f39fb6105adc
+      size: 606
+    - path: scripts/snapshot_databases.py
+      hash: md5
+      md5: 8e5a0e62983fafd2d3bfc739e9b11bf0
+      size: 3188
     - path: src/transform/process_to_curated_xs.py
       hash: md5
-      md5: 532cc1b5f92668d305909e5ee4854978
-      size: 8565
+      md5: 0a06fe1a34e305d7c2b44c831456aa0a
+      size: 8655
     outs:
-    - path: data/.pipeline_state/curated_xs_ready.txt
+    - path: data/versioned_snapshots/market_sequences_xs.jsonl.gz
       hash: md5
-      md5: d5a887b1329b5cc39cfccb2a6720b3a8
-      size: 21
+      md5: 1cb5e6bcbad32b72b95f5d18cdcc67e4
+      size: 173101
       isexec: true

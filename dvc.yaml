@@ -4,16 +4,13 @@ vars:
 stages:
   acquire_historical_source:
     cmd: >
-      mkdir -p data/.pipeline_state &&
       python scripts/acquire_historical_data.py
-      --destination ${source_csv} &&
-      date -u +"%Y-%m-%dT%H:%M:%SZ" > data/.pipeline_state/source_ready.txt
+      --destination ${source_csv}
     deps:
       - scripts/acquire_historical_data.py
       - params.yaml
     outs:
-      - data/.pipeline_state/source_ready.txt
-    always_changed: true
+      - ${source_csv}
 
   unpack_to_raw:
     cmd: >
@@ -34,7 +31,6 @@ stages:
       - build/unpack_to_raw.py
       - scripts/create_raw_bucket.py
       - ${source_csv}
-      - data/.pipeline_state/source_ready.txt
       - params.yaml
     outs:
       - data/.pipeline_state/raw_ready.txt
@@ -69,16 +65,22 @@ stages:
       --endpoint-url ${endpoint_url}
       --horizon ${horizon}
       --max_tickers ${xs_max_tickers} &&
-      date -u +"%Y-%m-%dT%H:%M:%SZ" > data/.pipeline_state/staging_xs_ready.txt
+      python scripts/snapshot_databases.py
+      --kind mysql
+      --mysql-host ${db_host}
+      --mysql-user ${db_user}
+      --mysql-password ${db_password}
+      --table market_data_xs
+      --output data/versioned_snapshots/market_data_xs.csv.gz
     deps:
       - src/transform/preprocess_to_staging.py
       - src/transform/preprocess_to_staging_xs.py
+      - scripts/snapshot_databases.py
       - data/.pipeline_state/raw_ready.txt
       - data/.pipeline_state/market_mood_ready.txt
       - params.yaml
     outs:
-      - data/.pipeline_state/staging_xs_ready.txt
-    always_changed: true
+      - data/versioned_snapshots/market_data_xs.csv.gz
 
   process_to_curated_xs:
     cmd: >
@@ -89,11 +91,15 @@ stages:
       --mongo_uri ${mongo_uri}
       --window_size ${window_size}
       --max_sequences_per_ticker ${xs_max_sequences_per_ticker} &&
-      date -u +"%Y-%m-%dT%H:%M:%SZ" > data/.pipeline_state/curated_xs_ready.txt
+      python scripts/snapshot_databases.py
+      --kind mongo
+      --mongo-uri ${mongo_uri}
+      --collection market_sequences_xs
+      --output data/versioned_snapshots/market_sequences_xs.jsonl.gz
     deps:
       - src/transform/process_to_curated_xs.py
-      - data/.pipeline_state/staging_xs_ready.txt
+      - scripts/snapshot_databases.py
+      - data/versioned_snapshots/market_data_xs.csv.gz
       - params.yaml
     outs:
-      - data/.pipeline_state/curated_xs_ready.txt
-    always_changed: true
+      - data/versioned_snapshots/market_sequences_xs.jsonl.gz
