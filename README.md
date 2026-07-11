@@ -1,603 +1,419 @@
 # Market Mood Lake
 
-Data lake local consacré à l'analyse directionnelle du marché à partir de données historiques multi-actions, du VIX et du Fear & Greed Index.
+Pipeline local de données et de Machine Learning consacré à l’analyse directionnelle du marché à partir de prix historiques, du VIX et du Fear & Greed Index.
 
-Le projet met en œuvre :
+Le projet fournit :
 
-- une zone **Raw** dans S3 via LocalStack ;
-- une zone **Staging** dans MySQL ;
-- une zone **Curated** dans MongoDB ;
-- une orchestration complète avec Apache Airflow ;
-- une API Gateway FastAPI ;
-- un pipeline Machine Learning fondé sur des GRU ;
-- une reproduction locale des transformations avec DVC.
+- une zone Raw compatible S3 avec LocalStack ;
+- une zone Staging dans MySQL ;
+- une zone Curated dans MongoDB ;
+- deux pipelines Airflow, ETL et ML ;
+- un DAG DVC fondé sur de vrais artefacts fichiers ;
+- une API FastAPI de consultation et d’ingestion ;
+- des modèles GRU et des validations chronologiques ;
+- une démonstration reproductible en une commande.
 
----
+## Démarrage rapide sous WSL
 
-## 1. Objectif
+Prérequis :
 
-L'objectif est de déterminer si l'historique des prix et les indicateurs de sentiment permettent de prédire la direction future du marché : hausse ou baisse.
+- WSL 2 avec Python 3.10 ou plus récent ;
+- Docker Desktop avec l’intégration WSL activée ;
+- environ 10 Gio libres pour le premier build.
 
-Le projet ne cherche pas uniquement à prévoir un prix exact. Il formule le problème comme une classification directionnelle, plus pertinente pour comparer le modèle à une baseline naïve.
-
-Deux modes de données sont disponibles :
-
-| Mode | Description |
-|---|---|
-| Mono-indice | Historique agrégé du S&P 500 |
-| Cross-sectional | Historique de plusieurs actions du S&P 500 |
-
----
-
-## 2. Périmètre d'automatisation
-
-Le pipeline Airflow acquiert explicitement le dataset historique. Il réutilise le fichier local,
-le télécharge depuis `HISTORICAL_DATA_URL`, ou génère en dernier recours un petit dataset de
-démonstration déterministe. Une machine neuve peut donc exécuter le projet sans compte Kaggle.
-Le fallback sert à valider l'infrastructure ; les résultats ML publiables doivent utiliser la
-source historique complète.
-
-| Étape | Statut | Responsable |
-|---|---:|---|
-| Acquisition du dataset historique | Automatique : fichier, URL, puis fallback de démonstration | Airflow / DVC |
-| Vérification du CSV source | Automatique | Airflow / DVC |
-| Création du bucket `raw` | Automatique | Airflow |
-| Génération de `sp500_combined.csv` | Automatique | Airflow / DVC |
-| Upload du fichier historique dans S3 | Automatique | Airflow / DVC |
-| Collecte du VIX et du Fear & Greed Index | Automatique | Airflow / DVC |
-| Transformation Raw vers Staging | Automatique | Airflow / DVC |
-| Transformation Staging vers Curated | Automatique | Airflow / DVC |
-| Entraînement GRU | Déclenchement manuel | DAG ML Airflow |
-| Benchmark API | Manuel | Script de benchmark |
-
-Pour une exécution hors ligne, le fichier attendu est :
-
-```text
-data/kaggle_stocks/SP500_Historical_Data.csv
-```
-
-Le fichier CSV n'est pas versionné dans Git mais devient une sortie DVC. Pour imposer une vraie
-source sur une machine neuve, définir avant le démarrage :
+Depuis la racine du dépôt :
 
 ```bash
-export HISTORICAL_DATA_URL="https://.../SP500_Historical_Data.csv"
-```
-
-Sans cette variable, le fallback hors ligne est créé automatiquement. L'option
-`--no-demo-fallback` permet aux exécutions de production d'échouer si la vraie source manque.
-
-Avant toute exécution, le correcteur peut diagnostiquer son environnement avec une seule commande :
-
-```bash
-python scripts/doctor.py
-```
-
-Prévoir environ 10 Gio libres pour un premier build Docker (Airflow et PyTorch sont volumineux).
-Une installation déjà construite est acceptée par le diagnostic à partir de 0,5 Gio, mais libérer
-davantage d'espace reste recommandé.
-
----
-
-## 3. Architecture
-
-```text
-Dataset historique                  API VIX / Fear & Greed
-        |                                      |
-        +------------------+-------------------+
-                           |
-                           v
-                 Raw - S3 LocalStack
-                           |
-                           v
-                   Staging - MySQL
-                           |
-                           v
-                  Curated - MongoDB
-                           |
-                 +---------+---------+
-                 |                   |
-                 v                   v
-             FastAPI             Pipeline GRU
-```
-
-| Zone | Technologie | Contenu |
-|---|---|---|
-| Raw | S3 LocalStack | CSV historique combiné et payloads JSON de sentiment |
-| Staging | MySQL | Données nettoyées, enrichies et dédupliquées |
-| Curated | MongoDB | Fenêtres temporelles, labels et résultats ML |
-
----
-
-## 4. Services Docker
-
-| Service | Rôle | Port |
-|---|---|---:|
-| `api` | API FastAPI | `8000` |
-| `airflow-webserver` | Interface Airflow | `8081` |
-| `airflow-scheduler` | Planification des DAGs | Interne |
-| `localstack` | S3 local | `4566` |
-| `mysql` | Zone Staging | `3306` |
-| `mongodb` | Zone Curated | `27017` |
-| `postgres` | Métadonnées Airflow | Interne |
-
----
-
-## 5. Chemins de référence
-
-Un seul chemin source est utilisé dans le dépôt :
-
-```text
-data/kaggle_stocks/SP500_Historical_Data.csv
-```
-
-Le chemin historique `data/kaggle_sp500` n'est plus utilisé.
-
-### Exécution locale avec DVC
-
-```text
-src/ingestion/market_api.py
-src/transform/preprocess_to_staging.py
-src/transform/process_to_curated.py
-data/kaggle_stocks/
-http://localhost:4566
-```
-
-### Exécution dans Airflow
-
-Docker monte les dossiers du dépôt dans le conteneur :
-
-| Hôte | Conteneur Airflow |
-|---|---|
-| `./src` | `/opt/airflow/src` |
-| `./build` | `/opt/airflow/build` |
-| `./data` | `/opt/airflow/data` |
-| `./models` | `/opt/airflow/models` |
-| `./dags` | `/opt/airflow/dags` |
-
-Les commandes du DAG doivent donc utiliser :
-
-```text
-/opt/airflow/src/ingestion/market_api.py
-/opt/airflow/src/transform/preprocess_to_staging.py
-/opt/airflow/src/transform/process_to_curated.py
-```
-
-Les noms réseau Docker sont :
-
-```text
-LocalStack : http://localstack:4566
-MySQL     : mysql
-MongoDB   : mongodb
-```
-
----
-
-## 6. Prérequis
-
-- Docker Desktop ;
-- WSL2 sous Windows ;
-- Docker Compose ;
-- Python 3.10 ou supérieur pour DVC et les scripts locaux ;
-- le CSV source dans `data/kaggle_stocks/`.
-
-Sous WSL, utiliser Python 3.11 et un environnement Linux dédié :
-
-```bash
-python3.11 -m venv .venv-wsl
+python3 -m venv .venv-wsl
 source .venv-wsl/bin/activate
+python -m pip install --upgrade pip
 python -m pip install -r build/requirements.txt
-```
-
-Credentials LocalStack :
-
-```bash
-export AWS_ACCESS_KEY_ID=test
-export AWS_SECRET_ACCESS_KEY=test
-export AWS_DEFAULT_REGION=us-east-1
-```
-
----
-
-## 7. Démarrage rapide
-
-À la racine du projet :
-
-```bash
+python scripts/doctor.py
 docker compose up -d --build
+```
+
+Si la commande `docker compose` de WSL n’est pas disponible, Docker Desktop peut être appelé avec `docker.exe compose`.
+
+Interfaces locales :
+
+| Service | Adresse | Identifiants |
+|---|---|---|
+| API | http://localhost:8000 | aucun |
+| Swagger | http://localhost:8000/docs | aucun |
+| Airflow | http://localhost:8081 | `airflow` / `airflow` |
+| LocalStack S3 | http://localhost:4566 | clés locales `test` / `test` |
+| MySQL | `localhost:3306` | `root` / `root` |
+| MongoDB | `localhost:27017` | aucun |
+
+Vérifier les conteneurs :
+
+```bash
 docker compose ps
 ```
 
-Interfaces :
+Tous les services applicables doivent être `healthy`.
 
-```text
-FastAPI : http://localhost:8000/docs
-Airflow : http://localhost:8081
-```
+## Démonstration reproductible
 
-Identifiants Airflow :
-
-```text
-airflow / airflow
-```
-
----
-
-## 8. DAG principal autonome
-
-Le DAG principal est :
-
-```text
-market_mood_pipeline
-```
-
-Il est planifié toutes les six heures et exécute :
-
-```text
-acquire_historical_source
-    -> init_raw_sp500
-    -> fetch_market_mood
-    -> preprocess_to_staging
-    -> process_to_curated
-```
-
-### `acquire_historical_source`
-
-Cette tâche idempotente réutilise le CSV local ou le télécharge atomiquement depuis
-`HISTORICAL_DATA_URL`, puis vérifie qu'il n'est pas vide.
-
-### `init_raw_sp500`
-
-Cette tâche :
-
-1. crée le bucket `raw` s'il n'existe pas ;
-2. vérifie la présence du fichier source ;
-3. exécute `build/unpack_to_raw.py` ;
-4. génère `sp500_combined.csv` ;
-5. envoie le fichier dans `s3://raw/sp500_combined.csv`.
-
-### `fetch_market_mood`
-
-Cette tâche récupère :
-
-- le VIX ;
-- le Fear & Greed Index ;
-
-puis écrit un fichier horodaté :
-
-```text
-s3://raw/market_mood_YYYYMMDDTHHMMSS.json
-```
-
-### `preprocess_to_staging`
-
-Cette tâche :
-
-- lit le CSV historique et les fichiers de sentiment dans S3 ;
-- nettoie les données ;
-- calcule les features ;
-- construit le label directionnel ;
-- charge les lignes dans MySQL.
-
-### `process_to_curated`
-
-Cette tâche :
-
-- lit les données Staging ;
-- construit des fenêtres temporelles de 30 jours ;
-- prépare les documents ML ;
-- écrit les séquences dans MongoDB.
-
----
-
-## 9. Déclenchement et preuve d'exécution
-
-Déclencher le DAG depuis l'interface Airflow ou avec :
-
-```bash
-docker compose exec airflow-scheduler   airflow dags trigger market_mood_pipeline
-```
-
-Afficher les derniers runs :
-
-```bash
-docker compose exec airflow-scheduler   airflow dags list-runs -d market_mood_pipeline --limit 5
-```
-
-Le run est valide lorsque les quatre tâches sont en état `success`.
-
-### Vérifier la zone Raw
-
-```bash
-docker compose exec localstack   awslocal s3 ls s3://raw --recursive
-```
-
-Résultat attendu :
-
-```text
-sp500_combined.csv
-market_mood_YYYYMMDDTHHMMSS.json
-```
-
-### Vérifier la zone Staging
-
-```bash
-docker compose exec mysql   mysql -uroot -proot -e   "SELECT COUNT(*) AS row_count FROM staging.market_data;"
-```
-
-### Vérifier la zone Curated
-
-```bash
-docker compose exec mongodb mongosh --quiet --eval '
-const dbx = db.getSiblingDB("curated");
-printjson({
-  market_sequences: dbx.market_sequences.countDocuments({}),
-  model_runs: dbx.model_runs.countDocuments({})
-});
-'
-```
-
-### Vérifier l'API
-
-```bash
-curl -s http://localhost:8000/health | python3 -m json.tool
-curl -s http://localhost:8000/stats | python3 -m json.tool
-```
-
-Le healthcheck doit indiquer que les connexions S3, MySQL et MongoDB sont disponibles.
-
----
-
-## 10. Reproduction avec DVC
-
-DVC permet de relancer le pipeline depuis la machine hôte :
-
-```bash
-dvc repro
-```
-
-Ordre des étapes :
-
-```text
-acquire_historical_source
-    -> unpack_to_raw
-    -> fetch_market_mood
-    -> preprocess_to_staging_xs
-    -> process_to_curated_xs
-```
-
-La voie DVC est cross-sectional et volontairement bornée par défaut à 50 tickers et
-1 000 séquences par ticker (`xs_max_tickers`, `xs_max_sequences_per_ticker` dans
-`params.yaml`). Le DAG Airflow principal construit désormais les deux branches après une
-acquisition commune : le proxy de marché mono-série et la branche cross-sectional. Les limites
-Airflow équivalentes sont configurables avec `XS_MAX_TICKERS` et
-`XS_MAX_SEQUENCES_PER_TICKER`.
-
-Les bases restent les supports d'exécution, mais leur contenu utile est maintenant exporté sous
-forme d'artefacts déterministes réellement suivis par DVC :
-
-```text
-data/kaggle_stocks/SP500_Historical_Data.csv
-data/raw_snapshot/sp500_combined.csv
-data/raw_snapshot/market_mood.json
-data/versioned_snapshots/market_data_xs.csv.gz
-data/versioned_snapshots/market_sequences_xs.jsonl.gz
-```
-
-La source acquise, le CSV Raw normalisé, la réponse Market Mood et les exports des bases sont de
-véritables sorties DVC. Les snapshots gzip ont un en-tête stable (`mtime=0`), un tri stable et un
-contenu canonique. DVC peut ainsi mettre en cache, restaurer et comparer le contenu de chaque zone ;
-le DAG ne dépend plus de fichiers d'état ni de `always_changed: true`. Pour rafraîchir volontairement
-les API externes plutôt que restaurer leur snapshot, utiliser `dvc repro -f fetch_market_mood`.
-
-Preuve du démarrage sans CSV ni URL : le test `test_missing_source_generates_offline_demo` exécute
-l'acquisition dans un répertoire temporaire vide. La même logique est la première étape de
-`dvc repro` et d'Airflow.
-
-Les paramètres locaux sont centralisés dans :
-
-```text
-params.yaml
-```
-
-DVC utilise les endpoints de la machine hôte :
-
-```text
-LocalStack : http://localhost:4566
-MySQL     : localhost
-MongoDB   : localhost
-```
-
----
-
-## 11. DAG Machine Learning
-
-Le DAG ML est :
-
-```text
-market_mood_ml_pipeline
-```
-
-Il est déclenché manuellement, car l'entraînement est plus coûteux que l'ingestion.
-
-```text
-export_dataset
-    -> train_price_only
-    -> train_full
-```
-
-Sorties :
-
-| Sortie | Emplacement |
-|---|---|
-| Dataset `.npz` | `data/curated_export/market_sequences.npz` |
-| Artefacts JSON et checkpoints `.pt` | `models/model_runs/` |
-| Résultats ML | `curated.model_runs` dans MongoDB |
-| Dernier run | Endpoint `/stats` |
-
-Les deux variantes sont :
-
-| Mode | Features |
-|---|---|
-| `price_only` | Rendements, volatilité, RSI et moyennes mobiles |
-| `full` | Features prix, VIX et Fear & Greed |
-
-La validation est temporelle, regroupe les observations par date et purge les fenêtres
-qui se chevauchent aux frontières. La classe de la baseline est apprise uniquement sur
-le train. Chaque run enregistre le hash du dataset, la seed, le normaliseur, le schéma
-des features et un checkpoint PyTorch réutilisable.
-
----
-
-## 12. API Gateway
-
-Documentation :
-
-```text
-http://localhost:8000/docs
-```
-
-| Endpoint | Méthode | Rôle |
-|---|---|---|
-| `/health` | GET | État de l'API et des stockages |
-| `/stats` | GET | Statistiques globales et derniers résultats |
-| `/raw/` | GET | Objets de la zone Raw |
-| `/staging/` | GET | Lignes de la zone Staging |
-| `/curated/` | GET | Documents MongoDB |
-| `/ingest` | POST | Ingestion de référence |
-| `/ingest_fast` | POST | Ingestion batch optimisée |
-
-Pour afficher les runs ML :
-
-```bash
-curl -s   "http://localhost:8000/curated/?collection=model_runs&limit=5"   | python3 -m json.tool
-```
-
----
-
-## 13. Benchmark d'ingestion
-
-Lancer :
-
-```bash
-python scripts/benchmark_ingest.py --runs 10 --batch-sizes 1 100
-```
-
-Le mode rapide possède un chemin dédié aux micro-batches : il évite la compilation JIT inutile
-pour une ligne et réutilise un pool de connexions MySQL. Le benchmark utilise des paires sur des
-lignes SQL fraîches après remise à zéro de la table dédiée, alterne l'ordre `normal/rapide` puis `rapide/normal`, chauffe les deux chemins
-hors mesure et distingue le temps HTTP du temps serveur. Le critère est une amélioration médiane
-appariée du temps serveur d'au moins 30 %, pour les batchs 1 et 100. Le script retourne un code
-non nul si un seuil échoue.
-
-Le benchmark utilise `127.0.0.1` afin d'éviter le délai de fallback IPv6 de `localhost`, écrit
-dans une table dédiée et consigne le protocole, l'environnement et chaque paire mesurée.
-
-Résultats :
-
-```text
-data/benchmarks/ingest_benchmark_results.json
-```
-
----
-
-## 14. Structure du projet
-
-```text
-market-mood-lake/
-├── build/
-│   └── unpack_to_raw.py
-├── dags/
-│   ├── market_mood_pipeline.py
-│   └── market_mood_ml_pipeline.py
-├── data/
-│   ├── kaggle_stocks/
-│   │   └── SP500_Historical_Data.csv
-│   ├── curated_export/
-│   ├── benchmarks/
-│   ├── raw_snapshot/
-│   └── versioned_snapshots/
-├── models/
-│   └── model_runs/
-├── scripts/
-│   ├── benchmark_ingest.py
-│   └── smoke_api.py
-├── src/
-│   ├── ingestion/
-│   ├── transform/
-│   ├── api/
-│   └── ml/
-├── tests/
-├── docker-compose.yml
-├── dvc.yaml
-├── params.yaml
-└── README.md
-```
-
----
-
-## 15. Checklist de démonstration
-
-La démonstration complète est exécutable sous WSL/Linux avec une commande :
+La démonstration destinée au correcteur s’exécute sous WSL/Linux avec une seule commande :
 
 ```bash
 python scripts/run_reproducible_demo.py
 ```
 
-Elle contrôle l'environnement, démarre Docker, exécute les tests, reproduit DVC, lance le smoke
-test puis le benchmark apparié. Le rapport auditable (commit Git, commandes, durées, statut et
-empreinte du benchmark) est écrit dans :
+Elle enchaîne :
+
+1. le diagnostic de l’environnement ;
+2. le démarrage des services Docker ;
+3. la suite de tests Python ;
+4. `dvc repro` ;
+5. le smoke test de l’API et des volumes ;
+6. le benchmark apparié des endpoints d’ingestion.
+
+Le rapport final contient le commit Git, les commandes exécutées, leurs durées, leur statut et l’empreinte SHA-256 du benchmark :
 
 ```text
 data/benchmarks/reproducible_demo_report.json
 ```
 
-Pour une répétition rapide conservant les données DVC existantes :
+Pour conserver l’état DVC existant et relancer seulement les contrôles rapides :
 
 ```bash
 python scripts/run_reproducible_demo.py --skip-dvc
 ```
 
-```text
-[ ] L'acquisition produit ou restaure le CSV historique
-[ ] Les services Docker sont Up ou healthy
-[ ] Le DAG market_mood_pipeline est vert
-[ ] s3://raw contient sp500_combined.csv
-[ ] s3://raw contient au moins un market_mood_*.json
-[ ] staging.market_data contient des lignes
-[ ] curated.market_sequences contient des documents
-[ ] /health indique S3, MySQL et MongoDB disponibles
-[ ] /stats retourne les volumes du data lake
-[ ] Le DAG ML produit des artefacts dans models/model_runs/
-```
-
----
-
-## 16. Limites connues
-
-- L'acquisition est autonome : fichier local, URL `HISTORICAL_DATA_URL`, puis dataset de
-  démonstration déterministe généré hors ligne. Une source réelle reste requise pour interpréter
-  les résultats comme une étude de marché et non comme une validation technique.
-- L'entraînement ML est volontairement séparé du DAG d'ingestion.
-- DVC exporte le contenu utile de MySQL et MongoDB en snapshots déterministes versionnés ; les
-  bases demeurent les supports d'exécution, pas l'unique trace des résultats.
-- Sans `sector_etfs.csv` et `ticker_sector_map.csv`, les colonnes sectorielles XS sont
-  explicitement neutres et le mode ML `sector_full` est refusé.
-- Le disque hébergeant Docker doit conserver plusieurs gigaoctets libres ; les images
-  scientifiques et les volumes MongoDB cross-sectional sont volumineux.
-- Le signal directionnel observé par les modèles reste faible et instable selon les périodes.
-
----
-
-## 17. Conclusion
-
-Market Mood Lake fournit une chaîne démontrable de bout en bout :
+## Architecture
 
 ```text
-CSV historique + API
-        -> Raw S3
-        -> Staging MySQL
-        -> Curated MongoDB
-        -> API et modèles GRU
+Source historique                  VIX / Fear & Greed
+        │                                  │
+        └──────────────┬───────────────────┘
+                       ▼
+              Raw — LocalStack S3
+                       │
+             ┌─────────┴─────────┐
+             ▼                   ▼
+      Proxy mono-série     Données multi-tickers
+             │                   │
+             └─────────┬─────────┘
+                       ▼
+               Staging — MySQL
+                       │
+                       ▼
+              Curated — MongoDB
+                  ┌────┴────┐
+                  ▼         ▼
+               FastAPI   Pipeline ML
 ```
 
-Après le dépôt initial du CSV source, Airflow prend en charge automatiquement l'initialisation du Raw, l'ingestion des données de sentiment et les transformations vers Staging puis Curated. DVC fournit un second chemin d'exécution local cohérent avec les mêmes scripts et les mêmes paramètres.
+Deux représentations sont construites :
+
+| Voie | Description | Tables/collections |
+|---|---|---|
+| Mono-série | Proxy de marché équipondéré | `market_data`, `market_sequences` |
+| Cross-sectional | Fenêtres séparées par ticker | `market_data_xs`, `market_sequences_xs` |
+
+Le DAG Airflow principal exécute les deux voies après une acquisition commune. La voie DVC est cross-sectional et bornée par défaut pour rester compatible avec une machine d’évaluation.
+
+## Acquisition historique autonome
+
+L’étape `acquire_historical_source` applique cet ordre :
+
+1. réutiliser un CSV valide déjà présent ;
+2. télécharger l’URL définie dans `HISTORICAL_DATA_URL` ;
+3. en l’absence des deux, générer une fixture déterministe hors ligne de 3 tickers et 520 séances.
+
+Le projet peut donc démarrer sur une machine neuve sans compte Kaggle, sans URL et sans copie manuelle de fichier.
+
+Pour utiliser une vraie source historique :
+
+```bash
+export HISTORICAL_DATA_URL="https://example.org/SP500_Historical_Data.csv"
+dvc repro -f acquire_historical_source
+dvc repro
+```
+
+Le CSV doit contenir au minimum les colonnes `ticker`, `date` et `close`. La fixture intégrée valide l’infrastructure et les traitements ; elle ne doit pas être présentée comme un dataset financier réel pour interpréter les performances ML.
+
+Pour interdire le fallback de démonstration dans un contexte de production :
+
+```bash
+python scripts/acquire_historical_data.py \
+  --destination data/kaggle_stocks/SP500_Historical_Data.csv \
+  --no-demo-fallback
+```
+
+## Pipeline DVC
+
+Lancer la reproduction :
+
+```bash
+dvc repro
+```
+
+Graphe principal :
+
+```text
+acquire_historical_source
+    → unpack_to_raw
+    → fetch_market_mood
+    → preprocess_to_staging_xs
+    → process_to_curated_xs
+```
+
+Les paramètres sont centralisés dans [params.yaml](params.yaml), notamment :
+
+```yaml
+horizon: 1
+window_size: 30
+xs_max_tickers: 50
+xs_max_sequences_per_ticker: 1000
+```
+
+### Artefacts réellement suivis
+
+DVC ne se limite plus à des fichiers d’état. Chaque zone produit un artefact de contenu :
+
+| Étape | Sortie DVC |
+|---|---|
+| Acquisition | `data/kaggle_stocks/SP500_Historical_Data.csv` |
+| Raw historique | `data/raw_snapshot/sp500_combined.csv` |
+| Raw sentiment | `data/raw_snapshot/market_mood.json` |
+| Staging MySQL | `data/versioned_snapshots/market_data_xs.csv.gz` |
+| Curated MongoDB | `data/versioned_snapshots/market_sequences_xs.jsonl.gz` |
+
+Les snapshots gzip utilisent un en-tête stable, un tri stable et un JSON canonique. Le DAG ne contient plus de `always_changed: true` ni de fichier `.pipeline_state`.
+
+Un second appel sans modification doit afficher :
+
+```text
+Stage 'acquire_historical_source' didn't change, skipping
+...
+Data and pipelines are up to date.
+```
+
+Les appels externes sont ainsi figés par leur snapshot. Pour rafraîchir volontairement le VIX et le Fear & Greed :
+
+```bash
+dvc repro -f fetch_market_mood
+```
+
+Le dépôt ne configure pas de stockage DVC distant par défaut. Sur un clone neuf, les étapes reconstruisent les artefacts localement ; une équipe peut ajouter son propre remote avec `dvc remote add` puis `dvc push`.
+
+## Airflow
+
+Deux DAGs sont disponibles.
+
+### `market_mood_pipeline`
+
+Pipeline ETL planifié toutes les six heures :
+
+```text
+acquire_historical_source
+    → init_raw_sp500
+    → fetch_market_mood
+        ├→ preprocess_to_staging    → process_to_curated
+        └→ preprocess_to_staging_xs → process_to_curated_xs
+```
+
+Déclenchement manuel :
+
+```bash
+docker compose exec airflow-scheduler \
+  airflow dags trigger market_mood_pipeline
+```
+
+Contrôler les erreurs d’import :
+
+```bash
+docker compose exec airflow-scheduler \
+  airflow dags list-import-errors
+```
+
+### `market_mood_ml_pipeline`
+
+DAG manuel et séparé, car l’entraînement est plus coûteux :
+
+```text
+export_dataset
+    ├→ train_price_only
+    └→ train_full
+```
+
+Déclenchement :
+
+```bash
+docker compose exec airflow-scheduler \
+  airflow dags trigger market_mood_ml_pipeline
+```
+
+Les métriques sont enregistrées dans `curated.model_runs` et les checkpoints dans `models/model_runs/`.
+
+## Transformations et qualité des données
+
+Les transformations calculent notamment :
+
+- rendement logarithmique ;
+- volatilité glissante sur 20 séances ;
+- RSI sur 14 séances ;
+- ratio de moyennes mobiles ;
+- momentum ;
+- VIX et Fear & Greed alignés uniquement vers le passé ;
+- cible directionnelle à horizon configurable ;
+- contexte sectoriel lorsqu’il est disponible.
+
+Les publications MySQL et MongoDB utilisent des remplacements atomiques pour éviter les états partiels. Les fenêtres sont construites ticker par ticker, sans traverser les séries ni utiliser d’information future.
+
+## API FastAPI
+
+Routes principales :
+
+| Méthode | Route | Fonction |
+|---|---|---|
+| GET | `/health` | état API et connexions |
+| GET | `/stats` | volumes Raw, Staging et Curated |
+| GET | `/raw/` | objets Raw |
+| GET | `/staging/` | données MySQL |
+| GET | `/curated/` | séquences MongoDB |
+| POST | `/ingest` | ingestion ligne par ligne |
+| POST | `/ingest_fast` | ingestion vectorisée et batch |
+| DELETE | `/ingest/benchmark-data` | nettoyage de la table de benchmark isolée |
+
+Exemple :
+
+```bash
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/stats
+```
+
+Les endpoints de benchmark écrivent dans `market_data_ingest_benchmark` et ne modifient pas `market_data`.
+
+## Machine Learning
+
+Le pipeline ML :
+
+- exporte MongoDB vers un snapshot NPZ ;
+- sépare les dates chronologiquement avec purge entre les ensembles ;
+- apprend la normalisation uniquement sur le train ;
+- compare le modèle à une baseline calculée sur le train ;
+- fixe les graines aléatoires ;
+- enregistre le hash du dataset, le schéma de features, les métriques et le checkpoint PyTorch.
+
+Modes principaux :
+
+- `price_only` : prix et indicateurs techniques ;
+- `full` : prix, indicateurs et sentiment ;
+- `sector_full` : contexte sectoriel, uniquement si les sources sectorielles existent.
+
+Les scores obtenus sur la fixture de démonstration servent à valider le code, pas à conclure sur la prédictibilité du marché.
+
+## Tests et contrôles
+
+Suite Python :
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python -m pytest -q
+```
+
+Compilation sans écrire dans les dossiers montés Windows :
+
+```bash
+PYTHONPYCACHEPREFIX=/tmp/market-mood-pycache \
+  python -m compileall -q src scripts tests dags build
+```
+
+Smoke test :
+
+```bash
+python scripts/smoke_api.py
+```
+
+Autres contrôles utiles :
+
+```bash
+python scripts/doctor.py
+docker compose config --quiet
+dvc status
+git diff --check
+```
+
+## Benchmark d’ingestion
+
+Commande :
+
+```bash
+python scripts/benchmark_ingest.py --runs 10 --batch-sizes 1 100
+```
+
+Le protocole :
+
+- vide uniquement la table de benchmark ;
+- chauffe les deux endpoints hors mesure ;
+- utilise des lignes SQL fraîches ;
+- alterne l’ordre normal/rapide et rapide/normal ;
+- sépare le temps HTTP du temps serveur ;
+- calcule les gains par paires ;
+- exige une amélioration médiane d’au moins 30 % pour chaque batch ;
+- retourne un code non nul si une exigence échoue.
+
+Résultats détaillés :
+
+```text
+data/benchmarks/ingest_benchmark_results.json
+```
+
+Les durées dépendent de la machine ; le protocole et les mesures brutes sont conservés pour rendre le résultat vérifiable.
+
+## Structure utile
+
+```text
+market-mood-lake/
+├── build/                 # image Airflow et préparation Raw
+├── dags/                  # DAGs ETL et ML
+├── data/
+│   ├── benchmarks/        # rapports de démonstration
+│   ├── curated_export/    # snapshots NPZ ML
+│   ├── kaggle_stocks/     # source acquise/générée
+│   ├── raw_snapshot/      # sorties Raw DVC
+│   └── versioned_snapshots/ # exports MySQL/MongoDB DVC
+├── models/model_runs/     # checkpoints et métriques ML
+├── scripts/               # diagnostic, démo, benchmark, snapshots
+├── src/
+│   ├── api/
+│   ├── ingestion/
+│   ├── ml/
+│   └── transform/
+├── tests/
+├── docker-compose.yml
+├── dvc.yaml
+└── params.yaml
+```
+
+## Limites connues
+
+- La fixture hors ligne est synthétique et volontairement petite.
+- Le rafraîchissement du VIX et du Fear & Greed nécessite un accès réseau ; leur snapshot DVC permet ensuite de reproduire le run sans nouvel appel.
+- Les données sectorielles sont optionnelles. Sans elles, les colonnes sectorielles sont neutres et `sector_full` est refusé.
+- L’entraînement ML reste séparé du DAG ETL pour contrôler son coût.
+- Les images Airflow, PyTorch et les bases nécessitent plusieurs gigaoctets de disque.
+- Le signal directionnel observé peut être faible ou instable ; le projet ne constitue pas un conseil financier.
+
+## Arrêt et nettoyage
+
+Arrêter les services sans supprimer les données :
+
+```bash
+docker compose stop
+```
+
+Supprimer les conteneurs en conservant les volumes :
+
+```bash
+docker compose down
+```
+
+La suppression des volumes efface MySQL, MongoDB, PostgreSQL et LocalStack ; ne l’utiliser que si une réinitialisation totale est souhaitée :
+
+```bash
+docker compose down -v
+```
