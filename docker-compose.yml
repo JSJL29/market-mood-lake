@@ -2,74 +2,148 @@ services:
   localstack:
     image: localstack/localstack:2.3
     container_name: localstack
+    restart: unless-stopped
     ports:
-      - "4566:4566"
-      - "4572:4572"
+      - "127.0.0.1:4566:4566"
+      - "127.0.0.1:4572:4572"
     environment:
       - SERVICES=s3
       - DOCKER_HOST=unix:///var/run/docker.sock
       - PERSISTENCE=1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-east-1
     volumes:
       - localstack_data:/var/lib/localstack
+      - ./scripts/localstack-init.sh:/etc/localstack/init/ready.d/10-init-raw.sh:ro
+      - ./data/kaggle_stocks/SP500_Historical_Data.csv:/bootstrap/SP500_Historical_Data.csv:ro
 
   mysql:
     container_name: mysql
-    image: mysql:latest
+    image: mysql:9.7.1
+    restart: unless-stopped
     environment:
       - MYSQL_ROOT_PASSWORD=root
       - MYSQL_DATABASE=staging
     ports:
-      - "3306:3306"
+      - "127.0.0.1:3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   mongodb:
-    image: mongo:latest
+    image: mongo:8.2.11
     container_name: mongodb
+    restart: unless-stopped
     ports:
-      - "27017:27017"
+      - "127.0.0.1:27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   postgres:
     image: postgres:13
     container_name: postgres
+    restart: unless-stopped
     environment:
       - POSTGRES_USER=airflow
       - POSTGRES_PASSWORD=airflow
       - POSTGRES_DB=airflow
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  airflow-init:
+    build: .
+    image: market-mood-lake-airflow:2.7.1
+    container_name: airflow-init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - _AIRFLOW_DB_UPGRADE=true
+      - _AIRFLOW_WWW_USER_CREATE=true
+      - _AIRFLOW_WWW_USER_USERNAME=airflow
+      - _AIRFLOW_WWW_USER_PASSWORD=airflow
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-east-1
+      - PYTHONPATH=/opt/airflow
+      - S3_ENDPOINT_URL=http://localstack:4566
+      - MYSQL_HOST=mysql
+      - MYSQL_USER=root
+      - MYSQL_PASSWORD=root
+      - MYSQL_DATABASE=staging
+      - MONGO_URI=mongodb://mongodb:27017/
+    command: version
+    volumes:
+      - ./dags:/opt/airflow/dags:ro
+      - airflow_logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - ./src:/opt/airflow/scripts:ro
+      - ./src:/opt/airflow/src:ro
+      - ./scripts:/opt/airflow/scripts_tools:ro
+      - ./build:/opt/airflow/build:ro
+      - ./data:/opt/airflow/data
+      - ./models:/opt/airflow/models
 
   airflow-webserver:
     image: market-mood-lake-airflow:2.7.1
+    container_name: airflow-webserver
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
     deploy:
       resources:
         limits:
           memory: 4G
-    container_name: airflow-webserver
-    depends_on:
-      airflow-init:
-        condition: service_completed_successfully
     environment:
-      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
       - AIRFLOW__CORE__EXECUTOR=LocalExecutor
       - AIRFLOW__WEBSERVER__SECRET_KEY=your_secret_key_here
       - AIRFLOW__API__AUTH_BACKENDS=airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
       - AWS_ACCESS_KEY_ID=test
       - AWS_SECRET_ACCESS_KEY=test
       - AWS_DEFAULT_REGION=us-east-1
+      - PYTHONPATH=/opt/airflow
+      - S3_ENDPOINT_URL=http://localstack:4566
+      - MYSQL_HOST=mysql
+      - MYSQL_USER=root
+      - MYSQL_PASSWORD=root
+      - MYSQL_DATABASE=staging
+      - MONGO_URI=mongodb://mongodb:27017/
+      - HISTORICAL_DATA_URL=${HISTORICAL_DATA_URL:-}
+      - RAW_BUCKET=raw
+      - MARKET_START_DATE=2015-01-01
+      - LABEL_HORIZON=1
+      - WINDOW_SIZE=30
     volumes:
-      - ./dags:/opt/airflow/dags
-      - ./logs:/opt/airflow/logs
+      - ./dags:/opt/airflow/dags:ro
+      - airflow_logs:/opt/airflow/logs
       - ./plugins:/opt/airflow/plugins
-      - ./src:/opt/airflow/scripts
-      - ./build:/opt/airflow/build
+      - ./src:/opt/airflow/scripts:ro
+      - ./src:/opt/airflow/src:ro
+      - ./scripts:/opt/airflow/scripts_tools:ro
+      - ./build:/opt/airflow/build:ro
+      - ./data:/opt/airflow/data
+      - ./models:/opt/airflow/models
     ports:
-      - "8081:8080"
+      - "127.0.0.1:8081:8080"
     command: webserver
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
@@ -79,71 +153,87 @@ services:
 
   airflow-scheduler:
     image: market-mood-lake-airflow:2.7.1
+    container_name: airflow-scheduler
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
     deploy:
       resources:
         limits:
           memory: 4G
-    container_name: airflow-scheduler
-    depends_on:
-      airflow-init:
-        condition: service_completed_successfully
     environment:
-      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
       - AIRFLOW__CORE__EXECUTOR=LocalExecutor
       - AWS_ACCESS_KEY_ID=test
       - AWS_SECRET_ACCESS_KEY=test
       - AWS_DEFAULT_REGION=us-east-1
+      - PYTHONPATH=/opt/airflow
+      - S3_ENDPOINT_URL=http://localstack:4566
+      - MYSQL_HOST=mysql
+      - MYSQL_USER=root
+      - MYSQL_PASSWORD=root
+      - MYSQL_DATABASE=staging
+      - MONGO_URI=mongodb://mongodb:27017/
+      - HISTORICAL_DATA_URL=${HISTORICAL_DATA_URL:-}
+      - RAW_BUCKET=raw
+      - MARKET_START_DATE=2015-01-01
+      - LABEL_HORIZON=1
+      - WINDOW_SIZE=30
     volumes:
-      - ./dags:/opt/airflow/dags
-      - ./logs:/opt/airflow/logs
+      - ./dags:/opt/airflow/dags:ro
+      - airflow_logs:/opt/airflow/logs
       - ./plugins:/opt/airflow/plugins
-      - ./src:/opt/airflow/scripts
-      - ./build:/opt/airflow/build
+      - ./src:/opt/airflow/scripts:ro
+      - ./src:/opt/airflow/src:ro
+      - ./scripts:/opt/airflow/scripts_tools:ro
+      - ./build:/opt/airflow/build:ro
+      - ./data:/opt/airflow/data
+      - ./models:/opt/airflow/models
     command: scheduler
-
-  airflow-init:
-    build: .
-    image: market-mood-lake-airflow:2.7.1
-    container_name: airflow-init
-    depends_on:
-      - postgres
-    environment:
-      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
-      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
-      - _AIRFLOW_DB_UPGRADE=true
-      - _AIRFLOW_WWW_USER_CREATE=true
-      - _AIRFLOW_WWW_USER_USERNAME=airflow
-      - _AIRFLOW_WWW_USER_PASSWORD=airflow
-      - AWS_ACCESS_KEY_ID=test
-      - AWS_SECRET_ACCESS_KEY=test
-      - AWS_DEFAULT_REGION=us-east-1
-    command: version
-    volumes:
-      - ./dags:/opt/airflow/dags
-      - ./logs:/opt/airflow/logs
-      - ./plugins:/opt/airflow/plugins
-      - ./src:/opt/airflow/scripts
-      - ./build:/opt/airflow/build
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"$${HOSTNAME}\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
   api:
     build:
       context: .
       dockerfile: Dockerfile.api
     container_name: market-mood-api
+    restart: unless-stopped
     depends_on:
-      - localstack
-      - mysql
-      - mongodb
+      localstack:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
     environment:
       - AWS_ACCESS_KEY_ID=test
       - AWS_SECRET_ACCESS_KEY=test
       - AWS_DEFAULT_REGION=us-east-1
+      - PYTHONPATH=/app
+      - S3_ENDPOINT_URL=http://localstack:4566
+      - MYSQL_HOST=mysql
+      - MYSQL_USER=root
+      - MYSQL_PASSWORD=root
+      - MYSQL_DATABASE=staging
+      - MONGO_URI=mongodb://mongodb:27017/
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
-      - ./src:/app/src
+      - ./src:/app/src:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
 volumes:
   mysql_data:
+  mongodb_data:
   postgres_data:
   localstack_data:
+  airflow_logs:

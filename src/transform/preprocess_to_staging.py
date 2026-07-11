@@ -76,7 +76,7 @@ def compute_rsi(close, period=14):
             avg_loss = (avg_loss * (period - 1) + losses[i]) / period
 
         if avg_loss == 0:
-            rsi[i] = 100.0
+            rsi[i] = 50.0 if avg_gain == 0 else 100.0
         else:
             rs = avg_gain / avg_loss
             rsi[i] = 100.0 - (100.0 / (1.0 + rs))
@@ -96,7 +96,7 @@ def compute_ma_ratio(close, short_window=10, long_window=50):
     n = len(close)
     ratio = np.full(n, np.nan)
 
-    for i in range(long_window, n):
+    for i in range(long_window - 1, n):
         short_ma = np.mean(close[i - short_window + 1:i + 1])
         long_ma = np.mean(close[i - long_window + 1:i + 1])
         if long_ma != 0:
@@ -118,19 +118,67 @@ def get_market_mood_from_raw(endpoint_url, bucket_name, prefix="market_mood_"):
     depuis l'API (potentiellement plusieurs fichiers horodatés).
     """
     s3 = boto3.client('s3', endpoint_url=endpoint_url)
-    response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
-
     vix_rows = []
     fg_rows = []
-    for obj in response.get("Contents", []):
-        body = s3.get_object(Bucket=bucket_name, Key=obj["Key"])
-        payload = json.loads(body["Body"].read().decode("utf-8"))
-        vix_rows.extend(payload.get("vix", []))
-        fg_rows.extend(payload.get("fear_greed", []))
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            body = s3.get_object(Bucket=bucket_name, Key=obj["Key"])
+            payload = json.loads(body["Body"].read().decode("utf-8"))
+            vix_rows.extend(payload.get("vix", []))
+            fg_rows.extend(payload.get("fear_greed", []))
 
-    vix_df = pd.DataFrame(vix_rows).drop_duplicates(subset="date") if vix_rows else pd.DataFrame(columns=["date"])
-    fg_df = pd.DataFrame(fg_rows).drop_duplicates(subset="date") if fg_rows else pd.DataFrame(columns=["date"])
+    vix_df = pd.DataFrame(vix_rows).drop_duplicates(subset="date", keep="last") if vix_rows else pd.DataFrame(columns=["date"])
+    fg_df = pd.DataFrame(fg_rows).drop_duplicates(subset="date", keep="last") if fg_rows else pd.DataFrame(columns=["date"])
     return vix_df, fg_df
+
+
+def aggregate_market_proxy(stocks_df):
+    """Construit un proxy de marché équipondéré depuis un CSV multi-actions."""
+    df = stocks_df.copy()
+    df.columns = [column.strip().lower().replace(" ", "_") for column in df.columns]
+    if "ticker" not in df.columns:
+        return df
+
+    price_column = "adj_close" if "adj_close" in df.columns else "close"
+    required = {"ticker", "date", price_column}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Colonnes absentes pour construire le proxy marché: {sorted(missing)}")
+
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df[price_column] = pd.to_numeric(df[price_column], errors="coerce")
+    df = df.dropna(subset=["ticker", "date", price_column]).sort_values(["ticker", "date"])
+    df["ticker_log_return"] = df.groupby("ticker")[price_column].transform(
+        lambda values: np.log(values / values.shift(1))
+    )
+    daily = df.groupby("date", as_index=False).agg(
+        market_log_return=("ticker_log_return", "mean"),
+        volume=("volume", "sum") if "volume" in df.columns else (price_column, "size"),
+        constituent_count=("ticker", "nunique"),
+    )
+    daily = daily.dropna(subset=["market_log_return"]).sort_values("date").reset_index(drop=True)
+    daily["close"] = 100.0 * np.exp(daily["market_log_return"].cumsum())
+    return daily[["date", "close", "volume", "constituent_count"]]
+
+
+def align_market_mood(base_df, *mood_frames, tolerance_days=7):
+    """Aligne chaque indicateur sur sa dernière valeur passée disponible."""
+    merged = base_df.copy()
+    merged["date"] = pd.to_datetime(merged["date"], errors="coerce")
+    merged = merged.dropna(subset=["date"]).sort_values("date")
+    for mood_df in mood_frames:
+        if mood_df is None or mood_df.empty or len(mood_df.columns) <= 1:
+            continue
+        mood = mood_df.copy()
+        mood.columns = [column.strip().lower().replace(" ", "_") for column in mood.columns]
+        mood["date"] = pd.to_datetime(mood["date"], errors="coerce")
+        mood = mood.dropna(subset=["date"]).sort_values("date").drop_duplicates("date", keep="last")
+        merged = pd.merge_asof(
+            merged.sort_values("date"), mood, on="date", direction="backward",
+            tolerance=pd.Timedelta(days=tolerance_days),
+        )
+    return merged
 
 
 def clean_and_merge(sp500_df, vix_df, fg_df, horizon=1):
@@ -145,8 +193,12 @@ def clean_and_merge(sp500_df, vix_df, fg_df, horizon=1):
         horizon=5 -> prédiction à J+5 (~1 semaine de bourse), signal
         potentiellement moins noyé dans le bruit court terme.
     """
-    sp500_df = sp500_df.dropna(subset=["close"]).sort_values("date").reset_index(drop=True)
-    sp500_df["date"] = pd.to_datetime(sp500_df["date"]).dt.strftime("%Y-%m-%d")
+    if horizon < 1:
+        raise ValueError("horizon doit être supérieur ou égal à 1")
+    sp500_df = aggregate_market_proxy(sp500_df)
+    sp500_df = sp500_df.dropna(subset=["close"]).copy()
+    sp500_df["date"] = pd.to_datetime(sp500_df["date"], errors="coerce")
+    sp500_df = sp500_df.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
 
     close = sp500_df["close"].astype(np.float64).values
     log_return, rolling_vol = compute_features(close, window=20)
@@ -156,10 +208,13 @@ def clean_and_merge(sp500_df, vix_df, fg_df, horizon=1):
     sp500_df["ma_ratio"] = compute_ma_ratio(close, short_window=10, long_window=50)
 
     # Label : hausse (1) ou baisse (0) à J+horizon
-    sp500_df["target_up"] = (sp500_df["close"].shift(-horizon) > sp500_df["close"]).astype("Int64")
+    future_close = sp500_df["close"].shift(-horizon)
+    sp500_df["target_up"] = (future_close > sp500_df["close"]).astype("Int64")
+    sp500_df.loc[future_close.isna(), "target_up"] = pd.NA
 
-    merged = sp500_df.merge(vix_df, on="date", how="left").merge(fg_df, on="date", how="left")
+    merged = align_market_mood(sp500_df, vix_df, fg_df)
     merged = merged.dropna(subset=["log_return", "rolling_vol_20d", "rsi_14", "ma_ratio", "target_up"])
+    merged["date"] = merged["date"].dt.strftime("%Y-%m-%d")
 
     return merged
 
@@ -205,12 +260,12 @@ def create_table(connection):
             except Error:
                 pass  # la colonne existe déjà
     except Error as e:
-        print(f"Erreur lors de la création de la table: {e}")
+        raise RuntimeError(f"Erreur lors de la création de la table: {e}") from e
 
 
-def insert_data(connection, df):
+def insert_data(connection, df, batch_size=2000):
+    cursor = connection.cursor()
     try:
-        cursor = connection.cursor()
         insert_query = """
             INSERT INTO market_data (date, close, volume, log_return, rolling_vol_20d, rsi_14, ma_ratio, vix_close, fear_greed_score, target_up)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -230,11 +285,25 @@ def insert_data(connection, df):
             )
             for _, row in df.iterrows()
         ]
-        cursor.executemany(insert_query, values)
+        if not values:
+            raise ValueError("Aucune ligne Staging à charger")
+
+        # market_data représente un snapshot complet. Le remplacement et les
+        # batches partagent la même transaction : une erreur conserve donc le
+        # snapshot précédent au lieu de laisser des données mixtes/partielles.
+        cursor.execute("DELETE FROM market_data")
+        total = 0
+        for start in range(0, len(values), batch_size):
+            batch = values[start:start + batch_size]
+            cursor.executemany(insert_query, batch)
+            total += len(batch)
         connection.commit()
-        print(f"{cursor.rowcount} lignes insérées/mises à jour avec succès.")
-    except Error as e:
-        print(f"Erreur lors de l'insertion des données: {e}")
+        print(f"{total} lignes insérées/mises à jour avec succès.")
+    except Exception as e:
+        connection.rollback()
+        raise RuntimeError(f"Erreur lors de l'insertion des données: {e}") from e
+    finally:
+        cursor.close()
 
 
 def validate_data(connection):
@@ -249,7 +318,7 @@ def validate_data(connection):
         for row in cursor.fetchall():
             print(row)
     except Error as e:
-        print(f"Erreur lors de la validation des données: {e}")
+        raise RuntimeError(f"Erreur lors de la validation des données: {e}") from e
 
 
 def preprocess_to_staging(bucket_raw, sp500_file, db_host, db_user, db_password, endpoint_url, horizon=1):
@@ -265,13 +334,14 @@ def preprocess_to_staging(bucket_raw, sp500_file, db_host, db_user, db_password,
     print("Connexion à MySQL...")
     connection = create_mysql_connection(db_host, db_user, db_password, "staging")
     if connection is None:
-        return
+        raise RuntimeError("Connexion MySQL staging impossible")
 
-    create_table(connection)
-    insert_data(connection, merged)
-    validate_data(connection)
-
-    connection.close()
+    try:
+        create_table(connection)
+        insert_data(connection, merged)
+        validate_data(connection)
+    finally:
+        connection.close()
     print("\nTraitement terminé.")
 
 

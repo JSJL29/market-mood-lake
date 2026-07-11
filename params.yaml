@@ -1,8 +1,26 @@
+# Dataset source local
+input_dir: data/kaggle_stocks
+source_csv: data/kaggle_stocks/SP500_Historical_Data.csv
+
+# Zone raw S3 / LocalStack
 bucket_raw: raw
 sp500_file: sp500_combined.csv
+endpoint_url: http://localhost:4566
+
+# API de marché
+vix_period: max
+market_start_date: "2015-01-01"
+
+# Staging MySQL local, utilisé par `dvc repro`
 db_host: localhost
 db_user: root
 db_password: root
+
+# Curated MongoDB local, utilisé par `dvc repro`
 mongo_uri: mongodb://localhost:27017/
+
+# Transformation et ML
+horizon: 1
 window_size: 30
-endpoint_url: http://localhost:4566
+xs_max_tickers: 50
+xs_max_sequences_per_ticker: 1000

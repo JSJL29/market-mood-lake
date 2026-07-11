@@ -46,6 +46,12 @@ def walk_forward(npz_path, mode, n_folds=5, val_fraction=0.15, **train_kwargs):
     """
     features, labels = load_raw_npz(npz_path)
     n = len(labels)
+    if n_folds < 2:
+        raise ValueError("n_folds doit être supérieur ou égal à 2")
+    if not 0 < val_fraction < 1:
+        raise ValueError("val_fraction doit être strictement comprise entre 0 et 1")
+    if n < n_folds:
+        raise ValueError("Pas assez de séquences pour le nombre de folds demandé")
     fold_size = n // n_folds
 
     print(f"[{mode}] Walk-forward sur {n} séquences, {n_folds} segments de ~{fold_size} chacun.\n")
@@ -61,8 +67,10 @@ def walk_forward(npz_path, mode, n_folds=5, val_fraction=0.15, **train_kwargs):
         test_start = edges[k]
         test_end = edges[k + 1]
 
-        val_size = int(train_end * val_fraction)
+        val_size = max(1, int(train_end * val_fraction))
         actual_train_end = train_end - val_size
+        if actual_train_end < 1 or test_end <= test_start:
+            raise ValueError(f"Fold {k} vide avec les paramètres demandés")
 
         train_feat_raw = features[:actual_train_end]
         train_lab = labels[:actual_train_end]
@@ -119,7 +127,7 @@ def walk_forward(npz_path, mode, n_folds=5, val_fraction=0.15, **train_kwargs):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Validation walk-forward du GRU hausse/baisse")
     parser.add_argument("--npz_path", type=str, required=True)
-    parser.add_argument("--mode", type=str, choices=["price_only", "full"], default="full")
+    parser.add_argument("--mode", type=str, choices=["price_only", "full", "sector_full"], default="full")
     parser.add_argument("--n_folds", type=int, default=5, help="Nombre de segments temporels")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=32)

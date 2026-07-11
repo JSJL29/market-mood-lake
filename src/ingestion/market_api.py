@@ -19,10 +19,30 @@ class MarketMoodAPI:
     # dont le flux CNN lui-même pour la période récente.
     FEAR_GREED_HISTORY_URL = "https://raw.githubusercontent.com/whit3rabbit/fear-greed-data/main/fear-greed.csv"
     FEAR_GREED_CNN_URL = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
+    VIX_HISTORY_URL = "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
 
     @staticmethod
-    def get_vix(period="5d"):
-        """Récupère les dernières valeurs de clôture du VIX."""
+    def get_vix(period="5d", start_date=None):
+        """Récupère le VIX, avec l'historique officiel Cboe en priorité."""
+        if start_date or period == "max":
+            response = requests.get(MarketMoodAPI.VIX_HISTORY_URL, timeout=30)
+            response.raise_for_status()
+            cboe = pd.read_csv(io.StringIO(response.text))
+            cboe.columns = [column.strip().lower() for column in cboe.columns]
+            cboe["date"] = pd.to_datetime(cboe["date"], format="%m/%d/%Y", errors="coerce")
+            cboe = cboe.dropna(subset=["date", "close"])
+            if start_date:
+                cboe = cboe[cboe["date"] >= pd.Timestamp(start_date)]
+            return [
+                {
+                    "date": row["date"].strftime("%Y-%m-%d"),
+                    "vix_close": float(row["close"]),
+                    "vix_high": float(row["high"]),
+                    "vix_low": float(row["low"]),
+                }
+                for _, row in cboe.iterrows()
+            ]
+
         vix = yf.Ticker("^VIX")
         hist = vix.history(period=period)
 
@@ -120,7 +140,9 @@ def main():
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
 
     print("Récupération du VIX...")
-    vix_records = MarketMoodAPI.get_vix(args.period)
+    vix_records = MarketMoodAPI.get_vix(args.period, args.start_date)
+    if not vix_records:
+        raise RuntimeError("Aucune donnée VIX récupérée")
 
     print("Récupération du Fear & Greed Index...")
     try:
@@ -128,6 +150,9 @@ def main():
     except Exception as e:
         print(f"Fear & Greed indisponible ({e}), poursuite avec le VIX seul.")
         fg_records = []
+
+    if not fg_records:
+        raise RuntimeError("Aucune donnée Fear & Greed récupérée")
 
     payload = {
         "fetched_at": datetime.now(timezone.utc).isoformat(),

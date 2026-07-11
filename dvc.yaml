@@ -2,49 +2,98 @@ vars:
   - params.yaml
 
 stages:
-  unpack_to_raw:
+  acquire_historical_source:
     cmd: >
-      python build/unpack_to_raw.py
-      --input_dir data/kaggle_sp500
-      --bucket_name ${bucket_raw}
-      --output_file_name ${sp500_file}
-      --endpoint-url ${endpoint_url}
+      mkdir -p data/.pipeline_state &&
+      python scripts/acquire_historical_data.py
+      --destination ${source_csv} &&
+      date -u +"%Y-%m-%dT%H:%M:%SZ" > data/.pipeline_state/source_ready.txt
     deps:
-      - build/unpack_to_raw.py
+      - scripts/acquire_historical_data.py
       - params.yaml
     outs:
-      - data/kaggle_sp500
+      - data/.pipeline_state/source_ready.txt
+    always_changed: true
+
+  unpack_to_raw:
+    cmd: >
+      export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1 &&
+      mkdir -p data/.pipeline_state &&
+      test -f ${source_csv} &&
+      python scripts/create_raw_bucket.py
+      --endpoint-url ${endpoint_url}
+      --bucket ${bucket_raw} &&
+      python build/unpack_to_raw.py
+      --input_dir ${input_dir}
+      --input_file ${source_csv}
+      --bucket_name ${bucket_raw}
+      --output_file_name ${sp500_file}
+      --endpoint-url ${endpoint_url} &&
+      date -u +"%Y-%m-%dT%H:%M:%SZ" > data/.pipeline_state/raw_ready.txt
+    deps:
+      - build/unpack_to_raw.py
+      - scripts/create_raw_bucket.py
+      - ${source_csv}
+      - data/.pipeline_state/source_ready.txt
+      - params.yaml
+    outs:
+      - data/.pipeline_state/raw_ready.txt
+    always_changed: true
 
   fetch_market_mood:
     cmd: >
+      export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1 &&
       python src/ingestion/market_api.py
       --bucket_name ${bucket_raw}
       --endpoint-url ${endpoint_url}
+      --period ${vix_period}
+      --start_date ${market_start_date} &&
+      date -u +"%Y-%m-%dT%H:%M:%SZ" > data/.pipeline_state/market_mood_ready.txt
     deps:
       - src/ingestion/market_api.py
+      - data/.pipeline_state/raw_ready.txt
       - params.yaml
+    outs:
+      - data/.pipeline_state/market_mood_ready.txt
+    always_changed: true
 
-  preprocess_to_staging:
+  preprocess_to_staging_xs:
     cmd: >
-      python src/transform/preprocess_to_staging.py
+      export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1 &&
+      python -m src.transform.preprocess_to_staging_xs
       --bucket_raw ${bucket_raw}
-      --sp500_file ${sp500_file}
+      --stocks_file ${sp500_file}
       --db_host ${db_host}
       --db_user ${db_user}
       --db_password ${db_password}
       --endpoint-url ${endpoint_url}
+      --horizon ${horizon}
+      --max_tickers ${xs_max_tickers} &&
+      date -u +"%Y-%m-%dT%H:%M:%SZ" > data/.pipeline_state/staging_xs_ready.txt
     deps:
       - src/transform/preprocess_to_staging.py
+      - src/transform/preprocess_to_staging_xs.py
+      - data/.pipeline_state/raw_ready.txt
+      - data/.pipeline_state/market_mood_ready.txt
       - params.yaml
+    outs:
+      - data/.pipeline_state/staging_xs_ready.txt
+    always_changed: true
 
-  process_to_curated:
+  process_to_curated_xs:
     cmd: >
-      python src/transform/process_to_curated.py
+      python -m src.transform.process_to_curated_xs
       --mysql_host ${db_host}
       --mysql_user ${db_user}
       --mysql_password ${db_password}
       --mongo_uri ${mongo_uri}
       --window_size ${window_size}
+      --max_sequences_per_ticker ${xs_max_sequences_per_ticker} &&
+      date -u +"%Y-%m-%dT%H:%M:%SZ" > data/.pipeline_state/curated_xs_ready.txt
     deps:
-      - src/transform/process_to_curated.py
+      - src/transform/process_to_curated_xs.py
+      - data/.pipeline_state/staging_xs_ready.txt
       - params.yaml
+    outs:
+      - data/.pipeline_state/curated_xs_ready.txt
+    always_changed: true

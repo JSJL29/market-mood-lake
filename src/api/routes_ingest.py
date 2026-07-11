@@ -10,33 +10,55 @@ Optimisations utilisées dans /ingest_fast par rapport à /ingest :
 - Insertion MySQL par batch (executemany) au lieu d'un insert par ligne.
 """
 import time
+import os
+from datetime import date
 from typing import List
 
 import numpy as np
 from fastapi import APIRouter
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from numba import njit
 import mysql.connector
+from mysql.connector.pooling import MySQLConnectionPool
 
 router = APIRouter()
 
 MYSQL_CONFIG = {
-    'host': 'mysql',
-    'user': 'root',
-    'password': 'root',
-    'database': 'staging'
+    'host': os.getenv('MYSQL_HOST', 'mysql'),
+    'user': os.getenv('MYSQL_USER', 'root'),
+    'password': os.getenv('MYSQL_PASSWORD', 'root'),
+    'database': os.getenv('MYSQL_DATABASE', 'staging'),
 }
 
 
 class MarketTick(BaseModel):
-    date: str
-    close: float
-    volume: int = 0
-    vix_close: float | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    date: date
+    close: float = Field(gt=0)
+    volume: int = Field(default=0, ge=0)
+    vix_close: float | None = Field(default=None, ge=0)
 
 
 class IngestPayload(BaseModel):
-    data: List[MarketTick]
+    model_config = ConfigDict(extra="forbid")
+
+    data: List[MarketTick] = Field(min_length=1, max_length=10_000)
+    benchmark: bool = False
+
+
+_fast_pool = None
+_ensured_tables = set()
+
+
+def _fast_connection():
+    """Reuse established DB connections; this matters most for micro-batches."""
+    global _fast_pool
+    if _fast_pool is None:
+        _fast_pool = MySQLConnectionPool(
+            pool_name="ingest_fast", pool_size=5, pool_reset_session=False, **MYSQL_CONFIG
+        )
+    return _fast_pool.get_connection()
 
 
 @njit
@@ -73,39 +95,70 @@ def _naive_features(ticks: List[MarketTick]):
     return log_returns, vix_z
 
 
-def _insert_naive(ticks: List[MarketTick], log_returns, vix_z):
+def _table_for(benchmark: bool) -> str:
+    return "market_data_ingest_benchmark" if benchmark else "market_data_ingest"
+
+
+def _ensure_ingest_table(cursor, table: str) -> None:
+    if table in _ensured_tables:
+        return
+    cursor.execute(
+        f"""CREATE TABLE IF NOT EXISTS {table} (
+               date DATE PRIMARY KEY, close DOUBLE NOT NULL, volume BIGINT,
+               log_return DOUBLE, vix_close DOUBLE, vix_z DOUBLE
+           )"""
+    )
+    try:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN vix_z DOUBLE")
+    except mysql.connector.Error as exc:
+        if exc.errno != 1060:
+            raise
+    _ensured_tables.add(table)
+
+
+def _insert_naive(ticks: List[MarketTick], log_returns, vix_z, benchmark: bool = False):
     """Insertion ligne par ligne (naïve)."""
     conn = mysql.connector.connect(**MYSQL_CONFIG)
     cursor = conn.cursor()
-    for i, t in enumerate(ticks):
-        cursor.execute(
-            """INSERT INTO market_data (date, close, volume, log_return, vix_close)
-               VALUES (%s, %s, %s, %s, %s)
-               ON DUPLICATE KEY UPDATE close=VALUES(close), log_return=VALUES(log_return)""",
-            (t.date, t.close, t.volume, float(log_returns[i]), t.vix_close),
-        )
-    conn.commit()
-    cursor.close()
-    conn.close()
+    try:
+        table = _table_for(benchmark)
+        _ensure_ingest_table(cursor, table)
+        for i, t in enumerate(ticks):
+            cursor.execute(
+                f"""INSERT INTO {table} (date, close, volume, log_return, vix_close, vix_z)
+                   VALUES (%s, %s, %s, %s, %s, %s)
+                   ON DUPLICATE KEY UPDATE close=VALUES(close), volume=VALUES(volume),
+                   log_return=VALUES(log_return), vix_close=VALUES(vix_close), vix_z=VALUES(vix_z)""",
+                (t.date, t.close, t.volume, float(log_returns[i]), t.vix_close, float(vix_z[i])),
+            )
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
 
 
-def _insert_batch(ticks: List[MarketTick], log_returns, vix_z):
+def _insert_batch(ticks: List[MarketTick], log_returns, vix_z, benchmark: bool = False):
     """Insertion par batch avec executemany (optimisée)."""
-    conn = mysql.connector.connect(**MYSQL_CONFIG)
+    conn = _fast_connection()
     cursor = conn.cursor()
-    values = [
-        (t.date, t.close, t.volume, float(log_returns[i]), t.vix_close)
-        for i, t in enumerate(ticks)
-    ]
-    cursor.executemany(
-        """INSERT INTO market_data (date, close, volume, log_return, vix_close)
-           VALUES (%s, %s, %s, %s, %s)
-           ON DUPLICATE KEY UPDATE close=VALUES(close), log_return=VALUES(log_return)""",
-        values,
-    )
-    conn.commit()
-    cursor.close()
-    conn.close()
+    try:
+        table = _table_for(benchmark)
+        _ensure_ingest_table(cursor, table)
+        values = [
+            (t.date, t.close, t.volume, float(log_returns[i]), t.vix_close, float(vix_z[i]))
+            for i, t in enumerate(ticks)
+        ]
+        cursor.executemany(
+            f"""INSERT INTO {table} (date, close, volume, log_return, vix_close, vix_z)
+               VALUES (%s, %s, %s, %s, %s, %s)
+               ON DUPLICATE KEY UPDATE close=VALUES(close), volume=VALUES(volume),
+               log_return=VALUES(log_return), vix_close=VALUES(vix_close), vix_z=VALUES(vix_z)""",
+            values,
+        )
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
 
 
 @router.post("/ingest")
@@ -117,7 +170,7 @@ async def ingest(payload: IngestPayload):
     start = time.perf_counter()
 
     log_returns, vix_z = _naive_features(payload.data)
-    _insert_naive(payload.data, log_returns, vix_z)
+    _insert_naive(payload.data, log_returns, vix_z, benchmark=payload.benchmark)
 
     elapsed = time.perf_counter() - start
     return {
@@ -135,11 +188,19 @@ async def ingest_fast(payload: IngestPayload):
     """
     start = time.perf_counter()
 
+    if not payload.data:
+        return {"endpoint": "ingest_fast", "batch_size": 0, "elapsed_seconds": 0.0}
+
     close_arr = np.array([t.close for t in payload.data], dtype=np.float64)
     vix_arr = np.array([t.vix_close if t.vix_close is not None else 0.0 for t in payload.data], dtype=np.float64)
 
-    log_returns, vix_z = _vectorized_features(close_arr, vix_arr)
-    _insert_batch(payload.data, log_returns, vix_z)
+    # Calling Numba for one row costs more than the calculation itself.
+    if len(payload.data) == 1:
+        log_returns = np.zeros(1, dtype=np.float64)
+        vix_z = np.zeros(1, dtype=np.float64)
+    else:
+        log_returns, vix_z = _vectorized_features(close_arr, vix_arr)
+    _insert_batch(payload.data, log_returns, vix_z, benchmark=payload.benchmark)
 
     elapsed = time.perf_counter() - start
     return {

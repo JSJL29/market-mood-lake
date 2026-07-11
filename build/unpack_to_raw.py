@@ -7,7 +7,7 @@ import boto3
 
 
 def unpack_stocks_data(input_dir, bucket_name, output_file_name, endpoint_url="http://localhost:4566",
-                        max_tickers=None):
+                        max_tickers=None, input_file=None):
     """
     Ingestion d'un dataset multi-actions (cross-sectional) vers le bucket raw.
 
@@ -32,11 +32,15 @@ def unpack_stocks_data(input_dir, bucket_name, output_file_name, endpoint_url="h
     """
     s3 = boto3.client('s3', endpoint_url=endpoint_url)
     data_frames = []
-    csv_files = [f for f in os.listdir(input_dir) if f.endswith(".csv")]
+    if input_file:
+        input_path = os.path.abspath(input_file)
+        input_dir = os.path.dirname(input_path)
+        csv_files = [os.path.basename(input_path)]
+    else:
+        csv_files = sorted(f for f in os.listdir(input_dir) if f.endswith(".csv"))
 
     if not csv_files:
-        print(f"Aucun fichier CSV trouvé dans {input_dir}.")
-        return
+        raise FileNotFoundError(f"Aucun fichier CSV trouvé dans {input_dir}")
 
     for file_name in csv_files:
         file_path = os.path.join(input_dir, file_name)
@@ -58,6 +62,12 @@ def unpack_stocks_data(input_dir, bucket_name, output_file_name, endpoint_url="h
         data_frames.append(data)
 
     combined_data = pd.concat(data_frames, ignore_index=True)
+    required = {"date", "close", "ticker"}
+    missing = required - set(combined_data.columns)
+    if missing:
+        raise ValueError(f"CSV historique incomplet, colonnes manquantes: {sorted(missing)}")
+    if combined_data.empty:
+        raise ValueError("CSV historique vide")
     print(f"Tous les fichiers combinés : {len(combined_data)} lignes, "
           f"{combined_data['ticker'].nunique()} tickers.")
 
@@ -77,6 +87,7 @@ def unpack_stocks_data(input_dir, bucket_name, output_file_name, endpoint_url="h
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Ingestion multi-actions (cross-sectional) vers le bucket raw")
     parser.add_argument("--input_dir", type=str, required=True, help="Répertoire contenant le(s) CSV multi-actions")
+    parser.add_argument("--input_file", type=str, default=None, help="CSV source explicite (recommandé pour DVC/Airflow)")
     parser.add_argument("--bucket_name", type=str, default="raw", help="Nom du bucket S3")
     parser.add_argument("--output_file_name", type=str, default="stocks_combined.csv",
                          help="Nom du fichier de sortie sur S3")
@@ -86,4 +97,7 @@ if __name__ == "__main__":
                          help="Limite le nombre de tickers conservés (ex: 50 pour un traitement rapide)")
     args = parser.parse_args()
 
-    unpack_stocks_data(args.input_dir, args.bucket_name, args.output_file_name, args.endpoint_url, args.max_tickers)
+    unpack_stocks_data(
+        args.input_dir, args.bucket_name, args.output_file_name, args.endpoint_url,
+        args.max_tickers, args.input_file,
+    )

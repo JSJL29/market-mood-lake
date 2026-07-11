@@ -13,5 +13,8 @@ fastapi==0.115.0
 uvicorn==0.30.6
 pydantic==2.9.2
 dvc==3.42.0
+pathspec<1.0
 torch==2.5.1
 tqdm==4.66.5
+xgboost==2.1.1
+pytest==8.3.3
