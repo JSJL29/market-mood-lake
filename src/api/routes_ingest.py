@@ -208,3 +208,20 @@ async def ingest_fast(payload: IngestPayload):
         "batch_size": len(payload.data),
         "elapsed_seconds": round(elapsed, 6),
     }
+
+
+@router.delete("/ingest/benchmark-data")
+async def reset_benchmark_data():
+    """Reset only the isolated benchmark table, never pipeline data."""
+    conn = mysql.connector.connect(**MYSQL_CONFIG)
+    cursor = conn.cursor()
+    try:
+        table = _table_for(True)
+        _ensure_ingest_table(cursor, table)
+        cursor.execute(f"DELETE FROM {table}")
+        deleted = cursor.rowcount
+        conn.commit()
+        return {"table": table, "deleted_rows": deleted}
+    finally:
+        cursor.close()
+        conn.close()

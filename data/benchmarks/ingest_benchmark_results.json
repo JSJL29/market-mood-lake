@@ -1,6 +1,13 @@
 {
-  "created_at": "2026-07-11T14:58:17.672060+00:00",
+  "schema_version": 2,
+  "created_at": "2026-07-11T21:27:16.518376+00:00",
   "base_url": "http://127.0.0.1:8000",
+  "protocol": "isolated-table-reset-paired-fresh-rows-alternating-order",
+  "criterion": "median paired server-time improvement >= 30.0%",
+  "environment": {
+    "python": "3.11.15",
+    "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.43"
+  },
   "runs": 10,
   "batch_sizes": [
     1,
@@ -8,70 +15,407 @@
   ],
   "results": {
     "1": {
-      "ingest_times": [
-        0.010315500083379447,
-        0.009875599993392825,
-        0.021745999925769866,
-        0.010678599937818944,
-        0.0108644999563694,
-        0.01989039999898523,
-        0.02347899996675551,
-        0.010884500108659267,
-        0.03443860006518662,
-        0.011163899907842278
+      "pairs": [
+        {
+          "run": 1,
+          "order": [
+            "/ingest",
+            "/ingest_fast"
+          ],
+          "ingest": {
+            "wall_seconds": 0.02178571800050122,
+            "server_seconds": 0.017975
+          },
+          "ingest_fast": {
+            "wall_seconds": 0.0076133749998916755,
+            "server_seconds": 0.004431
+          },
+          "paired_server_improvement_percent": 75.34909596662031
+        },
+        {
+          "run": 2,
+          "order": [
+            "/ingest_fast",
+            "/ingest"
+          ],
+          "ingest": {
+            "wall_seconds": 0.019106056000055105,
+            "server_seconds": 0.015602
+          },
+          "ingest_fast": {
+            "wall_seconds": 0.006793030999688199,
+            "server_seconds": 0.003768
+          },
+          "paired_server_improvement_percent": 75.84925009614152
+        },
+        {
+          "run": 3,
+          "order": [
+            "/ingest",
+            "/ingest_fast"
+          ],
+          "ingest": {
+            "wall_seconds": 0.02099652699962462,
+            "server_seconds": 0.017968
+          },
+          "ingest_fast": {
+            "wall_seconds": 0.007484998999643722,
+            "server_seconds": 0.005099
+          },
+          "paired_server_improvement_percent": 71.62177203918077
+        },
+        {
+          "run": 4,
+          "order": [
+            "/ingest_fast",
+            "/ingest"
+          ],
+          "ingest": {
+            "wall_seconds": 0.01943462700000964,
+            "server_seconds": 0.016023
+          },
+          "ingest_fast": {
+            "wall_seconds": 0.008221289000175602,
+            "server_seconds": 0.004867
+          },
+          "paired_server_improvement_percent": 69.62491418585783
+        },
+        {
+          "run": 5,
+          "order": [
+            "/ingest",
+            "/ingest_fast"
+          ],
+          "ingest": {
+            "wall_seconds": 0.017573063999407168,
+            "server_seconds": 0.014069
+          },
+          "ingest_fast": {
+            "wall_seconds": 0.007506680999540549,
+            "server_seconds": 0.004682
+          },
+          "paired_server_improvement_percent": 66.72115999715686
+        },
+        {
+          "run": 6,
+          "order": [
+            "/ingest_fast",
+            "/ingest"
+          ],
+          "ingest": {
+            "wall_seconds": 0.019125879000057466,
+            "server_seconds": 0.015708
+          },
+          "ingest_fast": {
+            "wall_seconds": 0.007717084999967483,
+            "server_seconds": 0.004884
+          },
+          "paired_server_improvement_percent": 68.90756302521008
+        },
+        {
+          "run": 7,
+          "order": [
+            "/ingest",
+            "/ingest_fast"
+          ],
+          "ingest": {
+            "wall_seconds": 0.019075234000411,
+            "server_seconds": 0.016061
+          },
+          "ingest_fast": {
+            "wall_seconds": 0.011385587000404485,
+            "server_seconds": 0.006678
+          },
+          "paired_server_improvement_percent": 58.42101986177697
+        },
+        {
+          "run": 8,
+          "order": [
+            "/ingest_fast",
+            "/ingest"
+          ],
+          "ingest": {
+            "wall_seconds": 0.020214441000462102,
+            "server_seconds": 0.017451
+          },
+          "ingest_fast": {
+            "wall_seconds": 0.00769591100015532,
+            "server_seconds": 0.004359
+          },
+          "paired_server_improvement_percent": 75.02148873990029
+        },
+        {
+          "run": 9,
+          "order": [
+            "/ingest",
+            "/ingest_fast"
+          ],
+          "ingest": {
+            "wall_seconds": 0.020454319999771542,
+            "server_seconds": 0.017059
+          },
+          "ingest_fast": {
+            "wall_seconds": 0.008744488000047568,
+            "server_seconds": 0.005367
+          },
+          "paired_server_improvement_percent": 68.53860132481388
+        },
+        {
+          "run": 10,
+          "order": [
+            "/ingest_fast",
+            "/ingest"
+          ],
+          "ingest": {
+            "wall_seconds": 0.020143486999586457,
+            "server_seconds": 0.017212
+          },
+          "ingest_fast": {
+            "wall_seconds": 0.008212645000639895,
+            "server_seconds": 0.00532
+          },
+          "paired_server_improvement_percent": 69.09133162909599
+        }
       ],
-      "ingest_fast_times": [
-        0.002867200062610209,
-        0.022002599900588393,
-        0.02136500005144626,
-        0.00331880000885576,
-        0.003678599954582751,
-        0.0029630999779328704,
-        0.024855899973772466,
-        0.004647900001145899,
-        0.003593800007365644,
-        0.0034437000285834074
-      ],
-      "avg_ingest_seconds": 0.01633365999441594,
-      "avg_ingest_fast_seconds": 0.009273659996688366,
-      "median_ingest_seconds": 0.011024200008250773,
-      "median_ingest_fast_seconds": 0.0036361999809741974,
-      "improvement_avg_percent": 43.22362532427641,
-      "improvement_median_percent": 67.01620091931588,
-      "passes_30_percent_requirement": true
+      "server": {
+        "ingest": {
+          "mean_seconds": 0.0165128,
+          "median_seconds": 0.01656,
+          "min_seconds": 0.014069,
+          "max_seconds": 0.017975
+        },
+        "ingest_fast": {
+          "mean_seconds": 0.0049455,
+          "median_seconds": 0.0048755,
+          "min_seconds": 0.003768,
+          "max_seconds": 0.006678
+        }
+      },
+      "wall": {
+        "ingest": {
+          "mean_seconds": 0.019790935299988634,
+          "median_seconds": 0.01978905699979805,
+          "min_seconds": 0.017573063999407168,
+          "max_seconds": 0.02178571800050122
+        },
+        "ingest_fast": {
+          "mean_seconds": 0.00813750910001545,
+          "median_seconds": 0.007706498000061401,
+          "min_seconds": 0.006793030999688199,
+          "max_seconds": 0.011385587000404485
+        }
+      },
+      "paired_improvement": {
+        "mean_percent": 69.91461968657545,
+        "median_percent": 69.35812290747691,
+        "positive_pairs": 10,
+        "total_pairs": 10
+      },
+      "passes_requirement": true
     },
     "100": {
-      "ingest_times": [
-        0.037889900035224855,
-        0.02195299998857081,
-        0.0214136999566108,
-        0.020242300000973046,
-        0.021981599973514676,
-        0.03146949992515147,
-        0.020786000066436827,
-        0.04357720003463328,
-        0.022443699999712408,
-        0.04284500004723668
+      "pairs": [
+        {
+          "run": 1,
+          "order": [
+            "/ingest",
+            "/ingest_fast"
+          ],
+          "ingest": {
+            "wall_seconds": 0.059299006999935955,
+            "server_seconds": 0.055778
+          },
+          "ingest_fast": {
+            "wall_seconds": 0.015479551000680658,
+            "server_seconds": 0.011372
+          },
+          "paired_server_improvement_percent": 79.61203341819355
+        },
+        {
+          "run": 2,
+          "order": [
+            "/ingest_fast",
+            "/ingest"
+          ],
+          "ingest": {
+            "wall_seconds": 0.05143877400041674,
+            "server_seconds": 0.047522
+          },
+          "ingest_fast": {
+            "wall_seconds": 0.014754505999917455,
+            "server_seconds": 0.010424
+          },
+          "paired_server_improvement_percent": 78.06489625857499
+        },
+        {
+          "run": 3,
+          "order": [
+            "/ingest",
+            "/ingest_fast"
+          ],
+          "ingest": {
+            "wall_seconds": 0.04766286499943817,
+            "server_seconds": 0.044049
+          },
+          "ingest_fast": {
+            "wall_seconds": 0.01087468399964564,
+            "server_seconds": 0.00806
+          },
+          "paired_server_improvement_percent": 81.70219528252628
+        },
+        {
+          "run": 4,
+          "order": [
+            "/ingest_fast",
+            "/ingest"
+          ],
+          "ingest": {
+            "wall_seconds": 0.05293649499981257,
+            "server_seconds": 0.049318
+          },
+          "ingest_fast": {
+            "wall_seconds": 0.01219932699950732,
+            "server_seconds": 0.007585
+          },
+          "paired_server_improvement_percent": 84.62021979804534
+        },
+        {
+          "run": 5,
+          "order": [
+            "/ingest",
+            "/ingest_fast"
+          ],
+          "ingest": {
+            "wall_seconds": 0.04781206999996357,
+            "server_seconds": 0.043802
+          },
+          "ingest_fast": {
+            "wall_seconds": 0.014187843999934557,
+            "server_seconds": 0.010774
+          },
+          "paired_server_improvement_percent": 75.40294963700288
+        },
+        {
+          "run": 6,
+          "order": [
+            "/ingest_fast",
+            "/ingest"
+          ],
+          "ingest": {
+            "wall_seconds": 0.04776828900048713,
+            "server_seconds": 0.04397
+          },
+          "ingest_fast": {
+            "wall_seconds": 0.011580794000110473,
+            "server_seconds": 0.008029
+          },
+          "paired_server_improvement_percent": 81.73982260632249
+        },
+        {
+          "run": 7,
+          "order": [
+            "/ingest",
+            "/ingest_fast"
+          ],
+          "ingest": {
+            "wall_seconds": 0.05220141500012687,
+            "server_seconds": 0.048858
+          },
+          "ingest_fast": {
+            "wall_seconds": 0.0143345220003539,
+            "server_seconds": 0.010427
+          },
+          "paired_server_improvement_percent": 78.65856154570388
+        },
+        {
+          "run": 8,
+          "order": [
+            "/ingest_fast",
+            "/ingest"
+          ],
+          "ingest": {
+            "wall_seconds": 0.12807890499971109,
+            "server_seconds": 0.12305
+          },
+          "ingest_fast": {
+            "wall_seconds": 0.014597191000575549,
+            "server_seconds": 0.010358
+          },
+          "paired_server_improvement_percent": 91.58228362454287
+        },
+        {
+          "run": 9,
+          "order": [
+            "/ingest",
+            "/ingest_fast"
+          ],
+          "ingest": {
+            "wall_seconds": 0.045709562999945774,
+            "server_seconds": 0.042663
+          },
+          "ingest_fast": {
+            "wall_seconds": 0.010641693999787094,
+            "server_seconds": 0.007923
+          },
+          "paired_server_improvement_percent": 81.42887279375572
+        },
+        {
+          "run": 10,
+          "order": [
+            "/ingest_fast",
+            "/ingest"
+          ],
+          "ingest": {
+            "wall_seconds": 0.04303511299985985,
+            "server_seconds": 0.039677
+          },
+          "ingest_fast": {
+            "wall_seconds": 0.009557225999742514,
+            "server_seconds": 0.006625
+          },
+          "paired_server_improvement_percent": 83.30266905259974
+        }
       ],
-      "ingest_fast_times": [
-        0.004196099936962128,
-        0.004677799995988607,
-        0.004054099903441966,
-        0.01736459997482598,
-        0.01955740002449602,
-        0.0038561999099329114,
-        0.005140900029800832,
-        0.004522500094026327,
-        0.0283504999242723,
-        0.023672499926760793
-      ],
-      "avg_ingest_seconds": 0.028460190002806484,
-      "avg_ingest_fast_seconds": 0.011539259972050787,
-      "median_ingest_seconds": 0.022212649986613542,
-      "median_ingest_fast_seconds": 0.00490935001289472,
-      "improvement_avg_percent": 59.4547331872595,
-      "improvement_median_percent": 77.89840466647004,
-      "passes_30_percent_requirement": true
+      "server": {
+        "ingest": {
+          "mean_seconds": 0.0538687,
+          "median_seconds": 0.0457855,
+          "min_seconds": 0.039677,
+          "max_seconds": 0.12305
+        },
+        "ingest_fast": {
+          "mean_seconds": 0.0091577,
+          "median_seconds": 0.009208999999999998,
+          "min_seconds": 0.006625,
+          "max_seconds": 0.011372
+        }
+      },
+      "wall": {
+        "ingest": {
+          "mean_seconds": 0.05759424959996977,
+          "median_seconds": 0.049625422000190156,
+          "min_seconds": 0.04303511299985985,
+          "max_seconds": 0.12807890499971109
+        },
+        "ingest_fast": {
+          "mean_seconds": 0.012820733900025517,
+          "median_seconds": 0.013193585499720939,
+          "min_seconds": 0.009557225999742514,
+          "max_seconds": 0.015479551000680658
+        }
+      },
+      "paired_improvement": {
+        "mean_percent": 81.61145040172677,
+        "median_percent": 81.565534038141,
+        "positive_pairs": 10,
+        "total_pairs": 10
+      },
+      "passes_requirement": true
     }
-  }
+  },
+  "benchmark_table_reset": {
+    "table": "market_data_ingest_benchmark",
+    "deleted_rows": 2320
+  },
+  "all_requirements_pass": true
 }

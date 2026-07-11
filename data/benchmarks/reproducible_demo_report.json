@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "created_at": "2026-07-11T21:27:18.808749+00:00",
+  "git_commit": "4540e912b7b76007e02c9f124a55ba3cb03580a1",
+  "passed": true,
+  "steps": [
+    {
+      "label": "Environment diagnostics",
+      "command": [
+        "/mnt/c/Users/katia/Documents/Jacky Shang/S8/market-mood-lake/market-mood-lake/.venv-wsl/bin/python",
+        "scripts/doctor.py"
+      ],
+      "seconds": 3.305,
+      "passed": true
+    },
+    {
+      "label": "Start services",
+      "command": [
+        "docker",
+        "compose",
+        "up",
+        "-d"
+      ],
+      "seconds": 16.454,
+      "passed": true
+    },
+    {
+      "label": "Python regression suite",
+      "command": [
+        "/mnt/c/Users/katia/Documents/Jacky Shang/S8/market-mood-lake/market-mood-lake/.venv-wsl/bin/python",
+        "-m",
+        "pytest",
+        "-q"
+      ],
+      "seconds": 78.483,
+      "passed": true
+    },
+    {
+      "label": "DVC pipeline",
+      "command": [
+        "/mnt/c/Users/katia/Documents/Jacky Shang/S8/market-mood-lake/market-mood-lake/.venv-wsl/bin/python",
+        "-m",
+        "dvc",
+        "repro"
+      ],
+      "seconds": 110.723,
+      "passed": true
+    },
+    {
+      "label": "API/data-lake smoke test",
+      "command": [
+        "/mnt/c/Users/katia/Documents/Jacky Shang/S8/market-mood-lake/market-mood-lake/.venv-wsl/bin/python",
+        "scripts/smoke_api.py"
+      ],
+      "seconds": 0.447,
+      "passed": true
+    },
+    {
+      "label": "Paired ingestion benchmark",
+      "command": [
+        "/mnt/c/Users/katia/Documents/Jacky Shang/S8/market-mood-lake/market-mood-lake/.venv-wsl/bin/python",
+        "scripts/benchmark_ingest.py",
+        "--runs",
+        "10",
+        "--batch-sizes",
+        "1",
+        "100"
+      ],
+      "seconds": 3.705,
+      "passed": true
+    }
+  ],
+  "artifacts": {
+    "data/benchmarks/ingest_benchmark_results.json": "69ca35858d7d05049d70a87bcd4267e15d33b15be341aace4d65075e2d7253a6"
+  }
+}

@@ -28,7 +28,7 @@ stages:
     outs:
     - path: data/.pipeline_state/raw_ready.txt
       hash: md5
-      md5: 65d6a869ec3a861ac37563f9541dbd31
+      md5: ff5dc60fde02677cc6fe7bf6a2a29d0e
       size: 21
       isexec: true
   fetch_market_mood:
@@ -38,7 +38,7 @@ stages:
     deps:
     - path: data/.pipeline_state/raw_ready.txt
       hash: md5
-      md5: 65d6a869ec3a861ac37563f9541dbd31
+      md5: ff5dc60fde02677cc6fe7bf6a2a29d0e
       size: 21
     - path: params.yaml
       hash: md5
@@ -51,7 +51,7 @@ stages:
     outs:
     - path: data/.pipeline_state/market_mood_ready.txt
       hash: md5
-      md5: 19af3e348e35e5b3412f4a80a3d64901
+      md5: d66043b149e0c8d074d2a2cc58c94c8f
       size: 21
       isexec: true
   preprocess_to_staging:
@@ -121,11 +121,11 @@ stages:
     deps:
     - path: data/.pipeline_state/market_mood_ready.txt
       hash: md5
-      md5: 19af3e348e35e5b3412f4a80a3d64901
+      md5: d66043b149e0c8d074d2a2cc58c94c8f
       size: 21
     - path: data/.pipeline_state/raw_ready.txt
       hash: md5
-      md5: 65d6a869ec3a861ac37563f9541dbd31
+      md5: ff5dc60fde02677cc6fe7bf6a2a29d0e
       size: 21
     - path: params.yaml
       hash: md5
@@ -146,7 +146,7 @@ stages:
     outs:
     - path: data/versioned_snapshots/market_data_xs.csv.gz
       hash: md5
-      md5: c5ab281c033003cf12ba95daacefc167
+      md5: 55019da9b0dc281d39d21b5cb753f5f9
       size: 98154
       isexec: true
   acquire_historical_source:
@@ -175,7 +175,7 @@ stages:
     deps:
     - path: data/versioned_snapshots/market_data_xs.csv.gz
       hash: md5
-      md5: c5ab281c033003cf12ba95daacefc167
+      md5: 55019da9b0dc281d39d21b5cb753f5f9
       size: 98154
     - path: params.yaml
       hash: md5
@@ -192,6 +192,6 @@ stages:
     outs:
     - path: data/versioned_snapshots/market_sequences_xs.jsonl.gz
       hash: md5
-      md5: 1cb5e6bcbad32b72b95f5d18cdcc67e4
-      size: 173101
+      md5: cc427d2db220d2269d22e80324165a28
+      size: 173098
       isexec: true

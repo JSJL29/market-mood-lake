@@ -472,17 +472,18 @@ curl -s   "http://localhost:8000/curated/?collection=model_runs&limit=5"   | pyt
 Lancer :
 
 ```bash
-python3 scripts/benchmark_ingest.py   --runs 10   --batch-sizes 1 100
+python scripts/benchmark_ingest.py --runs 10 --batch-sizes 1 100
 ```
 
 Le mode rapide possède un chemin dédié aux micro-batches : il évite la compilation JIT inutile
-pour une ligne et réutilise un pool de connexions MySQL. Le seuil de 30 % reste mesuré par le
-benchmark (moyenne et médiane), car un objectif de latence dépend aussi de la machine et des
-services Docker. Les calculs et ce chemin batch=1 sont couverts par des tests de non-régression.
+pour une ligne et réutilise un pool de connexions MySQL. Le benchmark utilise des paires sur des
+lignes SQL fraîches après remise à zéro de la table dédiée, alterne l'ordre `normal/rapide` puis `rapide/normal`, chauffe les deux chemins
+hors mesure et distingue le temps HTTP du temps serveur. Le critère est une amélioration médiane
+appariée du temps serveur d'au moins 30 %, pour les batchs 1 et 100. Le script retourne un code
+non nul si un seuil échoue.
 
-Le benchmark utilise `127.0.0.1` afin d'éviter le délai de fallback IPv6 de `localhost`
-et écrit dans une table dédiée. Sur la validation du 11 juillet 2026, les gains moyens
-observés étaient de 43 % pour un batch de 1 et 59 % pour un batch de 100.
+Le benchmark utilise `127.0.0.1` afin d'éviter le délai de fallback IPv6 de `localhost`, écrit
+dans une table dédiée et consigne le protocole, l'environnement et chaque paire mesurée.
 
 Résultats :
 
@@ -528,8 +529,28 @@ market-mood-lake/
 
 ## 15. Checklist de démonstration
 
+La démonstration complète est exécutable sous WSL/Linux avec une commande :
+
+```bash
+python scripts/run_reproducible_demo.py
+```
+
+Elle contrôle l'environnement, démarre Docker, exécute les tests, reproduit DVC, lance le smoke
+test puis le benchmark apparié. Le rapport auditable (commit Git, commandes, durées, statut et
+empreinte du benchmark) est écrit dans :
+
 ```text
-[ ] Le CSV source existe dans data/kaggle_stocks/
+data/benchmarks/reproducible_demo_report.json
+```
+
+Pour une répétition rapide conservant les données DVC existantes :
+
+```bash
+python scripts/run_reproducible_demo.py --skip-dvc
+```
+
+```text
+[ ] L'acquisition produit ou restaure le CSV historique
 [ ] Les services Docker sont Up ou healthy
 [ ] Le DAG market_mood_pipeline est vert
 [ ] s3://raw contient sp500_combined.csv
