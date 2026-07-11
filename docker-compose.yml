@@ -16,7 +16,6 @@ services:
     volumes:
       - localstack_data:/var/lib/localstack
       - ./scripts/localstack_init.py:/etc/localstack/init/ready.d/10-init-raw.py:ro
-      - ./data/kaggle_stocks/SP500_Historical_Data.csv:/bootstrap/SP500_Historical_Data.csv:ro
 
   mysql:
     container_name: mysql

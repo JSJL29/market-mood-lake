@@ -125,6 +125,10 @@ L’étape `acquire_historical_source` applique cet ordre :
 
 Le projet peut donc démarrer sur une machine neuve sans compte Kaggle, sans URL et sans copie manuelle de fichier.
 
+LocalStack ne monte pas directement ce CSV depuis l’hôte : son hook d’initialisation crée uniquement
+le bucket `raw`. Le fichier est acquis puis publié par Airflow ou DVC, ce qui garantit que le fallback
+est réellement exercé sur un clone vierge.
+
 Pour utiliser une vraie source historique :
 
 ```bash
@@ -275,8 +279,8 @@ Routes principales :
 | GET | `/raw/` | objets Raw |
 | GET | `/staging/` | données MySQL |
 | GET | `/curated/` | séquences MongoDB |
-| POST | `/ingest` | ingestion ligne par ligne |
-| POST | `/ingest_fast` | ingestion vectorisée et batch |
+| POST | `/ingest` | mini-pipeline Raw → Staging → Curated, insertion ligne par ligne |
+| POST | `/ingest_fast` | même mini-pipeline, calcul vectorisé et insertion batch |
 | DELETE | `/ingest/benchmark-data` | nettoyage de la table de benchmark isolée |
 
 Exemple :
@@ -286,7 +290,19 @@ curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8000/stats
 ```
 
-Les endpoints de benchmark écrivent dans `market_data_ingest_benchmark` et ne modifient pas `market_data`.
+Pour un appel normal, le payload est d’abord archivé dans `s3://raw/api_ingest/`, puis transformé
+dans `staging.market_data_ingest`. À partir de 31 observations, les fenêtres de 30 jours et leur
+label suivant sont publiés atomiquement dans `curated.market_sequences_ingest`. Ces objets sont
+consultables avec :
+
+```bash
+curl "http://127.0.0.1:8000/staging/?table=market_data_ingest"
+curl "http://127.0.0.1:8000/curated/?collection=market_sequences_ingest"
+```
+
+Les appels avec `"benchmark": true` restent volontairement isolés : ils écrivent uniquement dans
+`market_data_ingest_benchmark`, ne créent pas d’objet Raw et ne reconstruisent pas Curated. Ils ne
+modifient jamais `market_data` ni les collections produites par Airflow/DVC.
 
 ## Machine Learning
 

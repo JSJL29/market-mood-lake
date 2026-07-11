@@ -11,15 +11,19 @@ Optimisations utilisées dans /ingest_fast par rapport à /ingest :
 """
 import time
 import os
-from datetime import date
+import json
+from datetime import date, datetime, timezone
 from typing import List
+from uuid import uuid4
 
+import boto3
 import numpy as np
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict, Field
 from numba import njit
 import mysql.connector
 from mysql.connector.pooling import MySQLConnectionPool
+from pymongo import MongoClient
 
 router = APIRouter()
 
@@ -29,6 +33,10 @@ MYSQL_CONFIG = {
     'password': os.getenv('MYSQL_PASSWORD', 'root'),
     'database': os.getenv('MYSQL_DATABASE', 'staging'),
 }
+S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "http://localstack:4566")
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://mongodb:27017/")
+INGEST_WINDOW_SIZE = int(os.getenv("INGEST_WINDOW_SIZE", "30"))
+INGEST_COLLECTION = "market_sequences_ingest"
 
 
 class MarketTick(BaseModel):
@@ -168,15 +176,20 @@ async def ingest(payload: IngestPayload):
     insertion MySQL ligne par ligne.
     """
     start = time.perf_counter()
+    raw_key = None if payload.benchmark else _archive_raw(payload, "ingest")
 
     log_returns, vix_z = _naive_features(payload.data)
     _insert_naive(payload.data, log_returns, vix_z, benchmark=payload.benchmark)
+    promotion = (
+        {} if payload.benchmark else _promote_to_data_lake(raw_key)
+    )
 
     elapsed = time.perf_counter() - start
     return {
         "endpoint": "ingest",
         "batch_size": len(payload.data),
         "elapsed_seconds": round(elapsed, 6),
+        **promotion,
     }
 
 
@@ -187,6 +200,7 @@ async def ingest_fast(payload: IngestPayload):
     features, insertion MySQL par batch (executemany).
     """
     start = time.perf_counter()
+    raw_key = None if payload.benchmark else _archive_raw(payload, "ingest_fast")
 
     if not payload.data:
         return {"endpoint": "ingest_fast", "batch_size": 0, "elapsed_seconds": 0.0}
@@ -201,12 +215,16 @@ async def ingest_fast(payload: IngestPayload):
     else:
         log_returns, vix_z = _vectorized_features(close_arr, vix_arr)
     _insert_batch(payload.data, log_returns, vix_z, benchmark=payload.benchmark)
+    promotion = (
+        {} if payload.benchmark else _promote_to_data_lake(raw_key)
+    )
 
     elapsed = time.perf_counter() - start
     return {
         "endpoint": "ingest_fast",
         "batch_size": len(payload.data),
         "elapsed_seconds": round(elapsed, 6),
+        **promotion,
     }
 
 
@@ -225,3 +243,86 @@ async def reset_benchmark_data():
     finally:
         cursor.close()
         conn.close()
+
+
+def _archive_raw(payload: IngestPayload, endpoint: str) -> str:
+    """Archive the immutable request before database transformations."""
+    timestamp = datetime.now(timezone.utc)
+    key = f"api_ingest/{timestamp:%Y/%m/%d}/{timestamp:%H%M%S%f}_{uuid4().hex}.json"
+    body = {
+        "schema_version": 1,
+        "ingested_at": timestamp.isoformat(),
+        "endpoint": endpoint,
+        "data": [tick.model_dump(mode="json") for tick in payload.data],
+    }
+    boto3.client("s3", endpoint_url=S3_ENDPOINT_URL).put_object(
+        Bucket="raw",
+        Key=key,
+        Body=json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        ContentType="application/json",
+    )
+    return key
+
+
+def _publish_curated_sequences(table: str) -> int:
+    """Build API-specific windows and atomically publish them to MongoDB."""
+    connection = mysql.connector.connect(**MYSQL_CONFIG)
+    cursor = connection.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            f"SELECT date, close, volume, log_return, vix_close, vix_z "
+            f"FROM {table} ORDER BY date"
+        )
+        rows = cursor.fetchall()
+    finally:
+        cursor.close()
+        connection.close()
+
+    feature_names = ["close", "log_return", "vix_close", "vix_z"]
+    documents = []
+    for end_index in range(INGEST_WINDOW_SIZE - 1, len(rows) - 1):
+        window = rows[end_index - INGEST_WINDOW_SIZE + 1 : end_index + 1]
+        documents.append(
+            {
+                "window_end_date": rows[end_index]["date"].isoformat(),
+                "features": [
+                    [
+                        float(row["close"]),
+                        float(row["log_return"] or 0.0),
+                        float(row["vix_close"] or 0.0),
+                        float(row["vix_z"] or 0.0),
+                    ]
+                    for row in window
+                ],
+                "label": int(rows[end_index + 1]["close"] > rows[end_index]["close"]),
+                "metadata": {
+                    "source": "api_ingest",
+                    "window_size": INGEST_WINDOW_SIZE,
+                    "feature_columns": feature_names,
+                },
+            }
+        )
+
+    client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=10_000)
+    database = client["curated"]
+    temporary = f"{INGEST_COLLECTION}__tmp_{uuid4().hex}"
+    try:
+        collection = database[temporary]
+        if documents:
+            collection.insert_many(documents, ordered=True)
+        collection.create_index("window_end_date", unique=True)
+        collection.rename(INGEST_COLLECTION, dropTarget=True)
+    finally:
+        database.drop_collection(temporary)
+        client.close()
+    return len(documents)
+
+
+def _promote_to_data_lake(raw_key: str) -> dict:
+    curated_count = _publish_curated_sequences(_table_for(False))
+    return {
+        "raw_key": raw_key,
+        "staging_table": _table_for(False),
+        "curated_collection": INGEST_COLLECTION,
+        "curated_sequences": curated_count,
+    }

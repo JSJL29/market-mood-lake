@@ -91,11 +91,12 @@ def get_staging_data(
     start_date: Optional[date] = Query(None, description="Date de début YYYY-MM-DD"),
     end_date: Optional[date] = Query(None, description="Date de fin YYYY-MM-DD"),
     limit: Optional[int] = Query(100, ge=1, le=5000, description="Nombre maximum de lignes"),
-    table: Optional[str] = Query("market_data", description="market_data ou market_data_xs"),
+    table: Optional[str] = Query("market_data", description="Table Staging autorisée"),
 ):
     """Récupère les données staging depuis MySQL."""
-    if table not in {"market_data", "market_data_xs"}:
-        raise HTTPException(status_code=400, detail="table doit valoir market_data ou market_data_xs")
+    allowed_tables = {"market_data", "market_data_xs", "market_data_ingest"}
+    if table not in allowed_tables:
+        raise HTTPException(status_code=400, detail=f"table doit être dans {sorted(allowed_tables)}")
 
     conn = None
     cursor = None
@@ -134,7 +135,10 @@ def get_curated_data(
     collection: Optional[str] = Query("market_sequences", description="Collection MongoDB curated"),
 ):
     """Récupère des documents curated depuis MongoDB."""
-    allowed = {"market_sequences", "market_sequences_xs", "model_runs", "benchmark_runs"}
+    allowed = {
+        "market_sequences", "market_sequences_xs", "market_sequences_ingest",
+        "model_runs", "benchmark_runs",
+    }
     if collection not in allowed:
         raise HTTPException(status_code=400, detail=f"collection doit être dans {sorted(allowed)}")
     try:
@@ -217,7 +221,7 @@ def stats():
     except Exception as exc:
         result["raw"] = {"error": str(exc)}
 
-    for table in ["market_data", "market_data_xs"]:
+    for table in ["market_data", "market_data_xs", "market_data_ingest"]:
         try:
             row_count = _mysql_scalar(f"SELECT COUNT(*) FROM {table}")
             min_date = _mysql_scalar(f"SELECT MIN(date) FROM {table}")
