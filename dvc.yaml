@@ -15,7 +15,6 @@ stages:
   unpack_to_raw:
     cmd: >
       export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1 &&
-      mkdir -p data/.pipeline_state &&
       test -f ${source_csv} &&
       python scripts/create_raw_bucket.py
       --endpoint-url ${endpoint_url}
@@ -25,16 +24,15 @@ stages:
       --input_file ${source_csv}
       --bucket_name ${bucket_raw}
       --output_file_name ${sp500_file}
-      --endpoint-url ${endpoint_url} &&
-      date -u +"%Y-%m-%dT%H:%M:%SZ" > data/.pipeline_state/raw_ready.txt
+      --endpoint-url ${endpoint_url}
+      --local-output data/raw_snapshot/${sp500_file}
     deps:
       - build/unpack_to_raw.py
       - scripts/create_raw_bucket.py
       - ${source_csv}
       - params.yaml
     outs:
-      - data/.pipeline_state/raw_ready.txt
-    always_changed: true
+      - data/raw_snapshot/${sp500_file}
 
   fetch_market_mood:
     cmd: >
@@ -43,15 +41,14 @@ stages:
       --bucket_name ${bucket_raw}
       --endpoint-url ${endpoint_url}
       --period ${vix_period}
-      --start_date ${market_start_date} &&
-      date -u +"%Y-%m-%dT%H:%M:%SZ" > data/.pipeline_state/market_mood_ready.txt
+      --start_date ${market_start_date}
+      --output-path data/raw_snapshot/market_mood.json
     deps:
       - src/ingestion/market_api.py
-      - data/.pipeline_state/raw_ready.txt
+      - data/raw_snapshot/${sp500_file}
       - params.yaml
     outs:
-      - data/.pipeline_state/market_mood_ready.txt
-    always_changed: true
+      - data/raw_snapshot/market_mood.json
 
   preprocess_to_staging_xs:
     cmd: >
@@ -76,8 +73,8 @@ stages:
       - src/transform/preprocess_to_staging.py
       - src/transform/preprocess_to_staging_xs.py
       - scripts/snapshot_databases.py
-      - data/.pipeline_state/raw_ready.txt
-      - data/.pipeline_state/market_mood_ready.txt
+      - data/raw_snapshot/${sp500_file}
+      - data/raw_snapshot/market_mood.json
       - params.yaml
     outs:
       - data/versioned_snapshots/market_data_xs.csv.gz

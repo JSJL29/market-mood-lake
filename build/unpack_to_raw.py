@@ -2,12 +2,13 @@ import os
 import re
 import tempfile
 import argparse
+from pathlib import Path
 import pandas as pd
 import boto3
 
 
 def unpack_stocks_data(input_dir, bucket_name, output_file_name, endpoint_url="http://localhost:4566",
-                        max_tickers=None, input_file=None):
+                        max_tickers=None, input_file=None, local_output=None):
     """
     Ingestion d'un dataset multi-actions (cross-sectional) vers le bucket raw.
 
@@ -76,7 +77,8 @@ def unpack_stocks_data(input_dir, bucket_name, output_file_name, endpoint_url="h
         combined_data = combined_data[combined_data["ticker"].isin(kept_tickers)]
         print(f"Limité à {max_tickers} tickers : {len(combined_data)} lignes conservées.")
 
-    combined_csv_path = os.path.join(tempfile.gettempdir(), output_file_name)
+    combined_csv_path = local_output or os.path.join(tempfile.gettempdir(), output_file_name)
+    Path(combined_csv_path).parent.mkdir(parents=True, exist_ok=True)
     combined_data.to_csv(combined_csv_path, index=False)
     print(f"Fichier combiné sauvegardé localement : {combined_csv_path}.")
 
@@ -95,9 +97,11 @@ if __name__ == "__main__":
                          help="URL du endpoint S3 (LocalStack)")
     parser.add_argument("--max_tickers", type=int, default=None,
                          help="Limite le nombre de tickers conservés (ex: 50 pour un traitement rapide)")
+    parser.add_argument("--local-output", type=str, default=None,
+                         help="Snapshot CSV local suivi par DVC")
     args = parser.parse_args()
 
     unpack_stocks_data(
         args.input_dir, args.bucket_name, args.output_file_name, args.endpoint_url,
-        args.max_tickers, args.input_file,
+        args.max_tickers, args.input_file, args.local_output,
     )

@@ -2,17 +2,16 @@ schema: '2.0'
 stages:
   unpack_to_raw:
     cmd: "export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1
-      && mkdir -p data/.pipeline_state && test -f data/kaggle_stocks/SP500_Historical_Data.csv
-      && python scripts/create_raw_bucket.py --endpoint-url http://localhost:4566
-      --bucket raw && python build/unpack_to_raw.py --input_dir data/kaggle_stocks
-      --input_file data/kaggle_stocks/SP500_Historical_Data.csv --bucket_name raw
-      --output_file_name sp500_combined.csv --endpoint-url http://localhost:4566 &&
-      date -u +\"%Y-%m-%dT%H:%M:%SZ\" > data/.pipeline_state/raw_ready.txt\n"
+      && test -f data/kaggle_stocks/SP500_Historical_Data.csv && python scripts/create_raw_bucket.py
+      --endpoint-url http://localhost:4566 --bucket raw && python build/unpack_to_raw.py
+      --input_dir data/kaggle_stocks --input_file data/kaggle_stocks/SP500_Historical_Data.csv
+      --bucket_name raw --output_file_name sp500_combined.csv --endpoint-url http://localhost:4566
+      --local-output data/raw_snapshot/sp500_combined.csv\n"
     deps:
     - path: build/unpack_to_raw.py
       hash: md5
-      md5: 40327ca460a5f5089f85e9718736014d
-      size: 4673
+      md5: 9c3486dca558bcee935454e03309b91a
+      size: 4947
     - path: data/kaggle_stocks/SP500_Historical_Data.csv
       hash: md5
       md5: 85f54581466575fad013033a04ee2916
@@ -26,33 +25,33 @@ stages:
       md5: 13135ddbc75d3d3ca75303125fac5730
       size: 1624
     outs:
-    - path: data/.pipeline_state/raw_ready.txt
+    - path: data/raw_snapshot/sp500_combined.csv
       hash: md5
-      md5: ff5dc60fde02677cc6fe7bf6a2a29d0e
-      size: 21
+      md5: fcbfb9b4d03b3581ce7dd2daadb5dd66
+      size: 91261
       isexec: true
   fetch_market_mood:
     cmd: "export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1
       && python src/ingestion/market_api.py --bucket_name raw --endpoint-url http://localhost:4566
-      --period max --start_date 2015-01-01 && date -u +\"%Y-%m-%dT%H:%M:%SZ\" > data/.pipeline_state/market_mood_ready.txt\n"
+      --period max --start_date 2015-01-01 --output-path data/raw_snapshot/market_mood.json\n"
     deps:
-    - path: data/.pipeline_state/raw_ready.txt
+    - path: data/raw_snapshot/sp500_combined.csv
       hash: md5
-      md5: ff5dc60fde02677cc6fe7bf6a2a29d0e
-      size: 21
+      md5: fcbfb9b4d03b3581ce7dd2daadb5dd66
+      size: 91261
     - path: params.yaml
       hash: md5
       md5: 35f3f00031e61ae40af1f39fb6105adc
       size: 606
     - path: src/ingestion/market_api.py
       hash: md5
-      md5: e423c573690c7fa7c30e164b307cb7ba
-      size: 6735
+      md5: 66cc5a488d7f298ec0d26cd6fcabbea3
+      size: 7205
     outs:
-    - path: data/.pipeline_state/market_mood_ready.txt
+    - path: data/raw_snapshot/market_mood.json
       hash: md5
-      md5: d66043b149e0c8d074d2a2cc58c94c8f
-      size: 21
+      md5: b266f8c0976b186fe956a20694a57f47
+      size: 360530
       isexec: true
   preprocess_to_staging:
     cmd: "python src/transform/preprocess_to_staging.py --bucket_raw raw --sp500_file
@@ -119,14 +118,14 @@ stages:
       --kind mysql --mysql-host localhost --mysql-user root --mysql-password root
       --table market_data_xs --output data/versioned_snapshots/market_data_xs.csv.gz\n"
     deps:
-    - path: data/.pipeline_state/market_mood_ready.txt
+    - path: data/raw_snapshot/market_mood.json
       hash: md5
-      md5: d66043b149e0c8d074d2a2cc58c94c8f
-      size: 21
-    - path: data/.pipeline_state/raw_ready.txt
+      md5: b266f8c0976b186fe956a20694a57f47
+      size: 360530
+    - path: data/raw_snapshot/sp500_combined.csv
       hash: md5
-      md5: ff5dc60fde02677cc6fe7bf6a2a29d0e
-      size: 21
+      md5: fcbfb9b4d03b3581ce7dd2daadb5dd66
+      size: 91261
     - path: params.yaml
       hash: md5
       md5: 35f3f00031e61ae40af1f39fb6105adc
@@ -146,7 +145,7 @@ stages:
     outs:
     - path: data/versioned_snapshots/market_data_xs.csv.gz
       hash: md5
-      md5: 55019da9b0dc281d39d21b5cb753f5f9
+      md5: 6d4409e834e01ff7c6dd44ffe40194fe
       size: 98154
       isexec: true
   acquire_historical_source:
@@ -158,8 +157,8 @@ stages:
       size: 606
     - path: scripts/acquire_historical_data.py
       hash: md5
-      md5: 4553a88151476db885ebf83ce9792d9e
-      size: 4653
+      md5: 3a51e8bb2cf6c001191c6402fc5826d7
+      size: 4634
     outs:
     - path: data/kaggle_stocks/SP500_Historical_Data.csv
       hash: md5
@@ -175,7 +174,7 @@ stages:
     deps:
     - path: data/versioned_snapshots/market_data_xs.csv.gz
       hash: md5
-      md5: 55019da9b0dc281d39d21b5cb753f5f9
+      md5: 6d4409e834e01ff7c6dd44ffe40194fe
       size: 98154
     - path: params.yaml
       hash: md5
@@ -192,6 +191,6 @@ stages:
     outs:
     - path: data/versioned_snapshots/market_sequences_xs.jsonl.gz
       hash: md5
-      md5: cc427d2db220d2269d22e80324165a28
-      size: 173098
+      md5: b63b0fea8ad2db38e7de59799b58562e
+      size: 173105
       isexec: true

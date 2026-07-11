@@ -1,8 +1,8 @@
 """Acquire the historical CSV used by the raw ingestion stage.
 
-The command is idempotent: an existing non-empty file is kept.  In CI or on a
-fresh machine, ``--source-url`` (or ``HISTORICAL_DATA_URL``) makes acquisition
-fully automatic without baking credentials or a vendor-specific URL into Git.
+The command is idempotent: an existing non-empty file is kept. On a fresh
+machine it can download ``HISTORICAL_DATA_URL`` or generate the deterministic
+offline demonstration fixture without credentials or manual files.
 """
 from __future__ import annotations
 

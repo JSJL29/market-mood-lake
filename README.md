@@ -377,14 +377,21 @@ forme d'artefacts déterministes réellement suivis par DVC :
 
 ```text
 data/kaggle_stocks/SP500_Historical_Data.csv
+data/raw_snapshot/sp500_combined.csv
+data/raw_snapshot/market_mood.json
 data/versioned_snapshots/market_data_xs.csv.gz
 data/versioned_snapshots/market_sequences_xs.jsonl.gz
 ```
 
-Les snapshots gzip ont un en-tête stable (`mtime=0`), un tri stable et un contenu canonique. DVC
-peut ainsi mettre en cache, restaurer et comparer les données MySQL/MongoDB, et pas seulement un
-fichier d'état. `always_changed` ne subsiste que sur les étapes qui interrogent ou publient un
-système externe mutable (S3/API), pas sur le versionnement des bases.
+La source acquise, le CSV Raw normalisé, la réponse Market Mood et les exports des bases sont de
+véritables sorties DVC. Les snapshots gzip ont un en-tête stable (`mtime=0`), un tri stable et un
+contenu canonique. DVC peut ainsi mettre en cache, restaurer et comparer le contenu de chaque zone ;
+le DAG ne dépend plus de fichiers d'état ni de `always_changed: true`. Pour rafraîchir volontairement
+les API externes plutôt que restaurer leur snapshot, utiliser `dvc repro -f fetch_market_mood`.
+
+Preuve du démarrage sans CSV ni URL : le test `test_missing_source_generates_offline_demo` exécute
+l'acquisition dans un répertoire temporaire vide. La même logique est la première étape de
+`dvc repro` et d'Airflow.
 
 Les paramètres locaux sont centralisés dans :
 
@@ -507,7 +514,8 @@ market-mood-lake/
 │   │   └── SP500_Historical_Data.csv
 │   ├── curated_export/
 │   ├── benchmarks/
-│   └── .pipeline_state/
+│   ├── raw_snapshot/
+│   └── versioned_snapshots/
 ├── models/
 │   └── model_runs/
 ├── scripts/

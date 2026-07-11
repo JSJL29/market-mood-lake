@@ -1,6 +1,7 @@
 import io
 import json
 import argparse
+from pathlib import Path
 from datetime import datetime, timezone
 
 import requests
@@ -135,6 +136,8 @@ def main():
     parser.add_argument('--bucket_name', type=str, default='raw', help='Nom du bucket S3 raw')
     parser.add_argument('--endpoint-url', type=str, default='http://localhost:4566',
                          help='URL du endpoint S3 (LocalStack)')
+    parser.add_argument('--output-path', type=Path, default=None,
+                         help='Snapshot JSON local suivi par DVC')
     args = parser.parse_args()
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
@@ -159,6 +162,14 @@ def main():
         "vix": vix_records,
         "fear_greed": fg_records,
     }
+
+    if args.output_path:
+        args.output_path.parent.mkdir(parents=True, exist_ok=True)
+        args.output_path.write_text(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        print(f"Snapshot market mood écrit dans {args.output_path}")
 
     upload_to_s3(payload, args.bucket_name, f"market_mood_{timestamp}.json", args.endpoint_url)
 
