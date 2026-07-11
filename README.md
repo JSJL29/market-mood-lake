@@ -367,8 +367,10 @@ acquire_historical_source
 
 La voie DVC est cross-sectional et volontairement bornée par défaut à 50 tickers et
 1 000 séquences par ticker (`xs_max_tickers`, `xs_max_sequences_per_ticker` dans
-`params.yaml`). Le DAG Airflow principal construit, lui, un proxy de marché
-équipondéré mono-série.
+`params.yaml`). Le DAG Airflow principal construit désormais les deux branches après une
+acquisition commune : le proxy de marché mono-série et la branche cross-sectional. Les limites
+Airflow équivalentes sont configurables avec `XS_MAX_TICKERS` et
+`XS_MAX_SEQUENCES_PER_TICKER`.
 
 Les bases restent les supports d'exécution, mais leur contenu utile est maintenant exporté sous
 forme d'artefacts déterministes réellement suivis par DVC :
@@ -543,9 +545,12 @@ market-mood-lake/
 
 ## 16. Limites connues
 
-- L'acquisition initiale nécessite soit un fichier local, soit une URL autorisée dans `HISTORICAL_DATA_URL`.
+- L'acquisition est autonome : fichier local, URL `HISTORICAL_DATA_URL`, puis dataset de
+  démonstration déterministe généré hors ligne. Une source réelle reste requise pour interpréter
+  les résultats comme une étude de marché et non comme une validation technique.
 - L'entraînement ML est volontairement séparé du DAG d'ingestion.
-- DVC orchestre des écritures vers des services externes ; ses fichiers d'état ne remplacent pas le versionnement natif d'une base de données.
+- DVC exporte le contenu utile de MySQL et MongoDB en snapshots déterministes versionnés ; les
+  bases demeurent les supports d'exécution, pas l'unique trace des résultats.
 - Sans `sector_etfs.csv` et `ticker_sector_map.csv`, les colonnes sectorielles XS sont
   explicitement neutres et le mode ML `sector_full` est refusé.
 - Le disque hébergeant Docker doit conserver plusieurs gigaoctets libres ; les images

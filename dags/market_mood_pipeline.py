@@ -32,6 +32,8 @@ RAW_BUCKET = os.getenv("RAW_BUCKET", "raw")
 MARKET_START_DATE = os.getenv("MARKET_START_DATE", "2015-01-01")
 LABEL_HORIZON = int(os.getenv("LABEL_HORIZON", "1"))
 WINDOW_SIZE = int(os.getenv("WINDOW_SIZE", "30"))
+XS_MAX_TICKERS = int(os.getenv("XS_MAX_TICKERS", "50"))
+XS_MAX_SEQUENCES_PER_TICKER = int(os.getenv("XS_MAX_SEQUENCES_PER_TICKER", "1000"))
 
 # Tâche 0 : acquiert le CSV (téléchargement configurable ou fichier local).
 acquire_historical_source = BashOperator(
@@ -155,4 +157,39 @@ process_to_curated = BashOperator(
     dag=dag,
 )
 
-acquire_historical_source >> init_raw_sp500 >> fetch_market_mood >> preprocess_to_staging >> process_to_curated
+# La même exécution Airflow publie également la voie cross-sectional utilisée
+# par DVC. Les limites évitent qu'une exécution d'évaluation sature la machine.
+preprocess_to_staging_xs = BashOperator(
+    task_id="preprocess_to_staging_xs",
+    bash_command=(
+        "cd /opt/airflow && python -m src.transform.preprocess_to_staging_xs "
+        f"--bucket_raw {RAW_BUCKET} "
+        "--stocks_file sp500_combined.csv "
+        "--db_host mysql "
+        "--db_user root "
+        "--db_password root "
+        "--endpoint-url http://localstack:4566 "
+        f"--horizon {LABEL_HORIZON} "
+        f"--max_tickers {XS_MAX_TICKERS}"
+    ),
+    env=aws_env,
+    dag=dag,
+)
+
+process_to_curated_xs = BashOperator(
+    task_id="process_to_curated_xs",
+    bash_command=(
+        "cd /opt/airflow && python -m src.transform.process_to_curated_xs "
+        "--mysql_host mysql "
+        "--mysql_user root "
+        "--mysql_password root "
+        "--mongo_uri mongodb://mongodb:27017/ "
+        f"--window_size {WINDOW_SIZE} "
+        f"--max_sequences_per_ticker {XS_MAX_SEQUENCES_PER_TICKER}"
+    ),
+    dag=dag,
+)
+
+acquire_historical_source >> init_raw_sp500 >> fetch_market_mood
+fetch_market_mood >> preprocess_to_staging >> process_to_curated
+fetch_market_mood >> preprocess_to_staging_xs >> process_to_curated_xs
