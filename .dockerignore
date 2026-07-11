@@ -1,0 +1,11 @@
+.git
+.dvc/cache
+.venv
+.venv-wsl
+__pycache__
+*.pyc
+data
+logs
+models
+notebooks
+.ipynb_checkpoints

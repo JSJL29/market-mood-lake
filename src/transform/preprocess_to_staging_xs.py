@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import argparse
 import io
+import itertools
+import uuid
 from typing import Optional
 
 import boto3
@@ -32,6 +34,7 @@ from src.transform.preprocess_to_staging import (
     compute_features,
     compute_ma_ratio,
     compute_rsi,
+    align_market_mood,
     get_market_mood_from_raw,
 )
 
@@ -53,6 +56,8 @@ REQUIRED_MODEL_COLUMNS = [
     "ma_ratio",
     "ticker_momentum_5d",
     "target_up",
+    "vix_close",
+    "fear_greed_score",
 ]
 
 
@@ -202,8 +207,11 @@ def clean_and_merge_xs(
     sector_etfs_df: Optional[pd.DataFrame] = None,
     sector_map_df: Optional[pd.DataFrame] = None,
     horizon: int = 1,
+    max_tickers: Optional[int] = None,
 ) -> pd.DataFrame:
     """Nettoie les données multi-actions et fusionne macro + secteur."""
+    if horizon < 1:
+        raise ValueError("horizon doit être supérieur ou égal à 1")
     stocks_df = _normalise_columns(stocks_df)
     if "ticker" not in stocks_df.columns:
         for candidate in ["symbol", "symbols"]:
@@ -220,6 +228,12 @@ def clean_and_merge_xs(
     if "volume" not in stocks_df.columns:
         stocks_df["volume"] = 0
     stocks_df["volume"] = pd.to_numeric(stocks_df["volume"], errors="coerce").fillna(0).astype(np.int64)
+    if max_tickers is not None:
+        if max_tickers < 1:
+            raise ValueError("max_tickers doit être supérieur ou égal à 1")
+        kept = stocks_df.groupby("ticker").size().nlargest(max_tickers).index
+        stocks_df = stocks_df[stocks_df["ticker"].isin(kept)].copy()
+        print(f"Mode borné: {len(kept)} tickers avec le plus d'historique conservés.")
 
     processed_groups = []
     tickers = stocks_df["ticker"].unique()
@@ -239,7 +253,9 @@ def clean_and_merge_xs(
         group["ticker_momentum_5d"] = _compute_momentum_5d(group["close"])
 
         # Label calculé DANS la série du ticker, jamais à cheval sur deux tickers.
-        group["target_up"] = (group["close"].shift(-horizon) > group["close"]).astype("Int64")
+        future_close = group["close"].shift(-horizon)
+        group["target_up"] = (future_close > group["close"]).astype("Int64")
+        group.loc[future_close.isna(), "target_up"] = pd.NA
         processed_groups.append(group)
 
     if not processed_groups:
@@ -248,13 +264,8 @@ def clean_and_merge_xs(
     all_stocks = pd.concat(processed_groups, ignore_index=True)
     all_stocks = merge_sector_context(all_stocks, sector_etfs_df, sector_map_df)
 
-    vix_df = _normalise_columns(vix_df)
-    fg_df = _normalise_columns(fg_df)
-    for df in [vix_df, fg_df]:
-        if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
-
-    merged = all_stocks.merge(vix_df, on="date", how="left").merge(fg_df, on="date", how="left")
+    merged = align_market_mood(all_stocks, vix_df, fg_df)
+    merged["date"] = merged["date"].dt.strftime("%Y-%m-%d")
 
     for col in SECTOR_NUMERIC_COLUMNS:
         merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(0.0)
@@ -267,8 +278,7 @@ def create_mysql_connection(host: str, user: str, password: str, database: str):
     try:
         return mysql.connector.connect(host=host, user=user, password=password, database=database)
     except Error as e:
-        print(f"Erreur lors de la connexion à MySQL: {e}")
-        return None
+        raise RuntimeError(f"Erreur lors de la connexion à MySQL: {e}") from e
 
 
 def create_table_xs(connection) -> None:
@@ -324,17 +334,20 @@ def create_table_xs(connection) -> None:
                 cursor.execute(f"ALTER TABLE market_data_xs ADD COLUMN {column_def}")
                 connection.commit()
                 print(f"Colonne '{column_name}' ajoutée à market_data_xs.")
-            except Error:
-                pass
+            except Error as exc:
+                if exc.errno != 1060:  # duplicate column
+                    raise
     except Error as e:
-        print(f"Erreur lors de la création de la table: {e}")
+        raise RuntimeError(f"Erreur lors de la création de la table: {e}") from e
 
 
-def insert_data_xs(connection, df: pd.DataFrame, batch_size: int = 5000) -> None:
+def insert_data_xs(connection, df: pd.DataFrame, batch_size: int = 5000, table_name="market_data_xs") -> None:
+    if not table_name.replace("_", "").isalnum():
+        raise ValueError("Nom de table invalide")
+    cursor = connection.cursor()
     try:
-        cursor = connection.cursor()
         insert_query = """
-            INSERT INTO market_data_xs (
+            INSERT INTO {table_name} (
                 date, ticker, close, volume,
                 log_return, rolling_vol_20d, rsi_14, ma_ratio, ticker_momentum_5d,
                 vix_close, fear_greed_score,
@@ -362,72 +375,71 @@ def insert_data_xs(connection, df: pd.DataFrame, batch_size: int = 5000) -> None
                 ticker_minus_sector_log_return=VALUES(ticker_minus_sector_log_return),
                 ticker_minus_sector_momentum_5d=VALUES(ticker_minus_sector_momentum_5d),
                 target_up=VALUES(target_up)
-        """
+        """.format(table_name=table_name)
 
-        values = []
-        for _, row in df.iterrows():
-            values.append(
-                (
-                    row["date"],
-                    row["ticker"],
-                    float(row["close"]),
-                    _to_int_or_zero(row.get("volume", 0)),
-                    _to_float_or_none(row.get("log_return")),
-                    _to_float_or_none(row.get("rolling_vol_20d")),
-                    _to_float_or_none(row.get("rsi_14")),
-                    _to_float_or_none(row.get("ma_ratio")),
-                    _to_float_or_none(row.get("ticker_momentum_5d")),
-                    _to_float_or_none(row.get("vix_close")),
-                    _to_float_or_none(row.get("fear_greed_score")),
-                    str(row.get("sector", "UNKNOWN")),
-                    str(row.get("sector_etf", "SPY")),
-                    _to_float_or_none(row.get("sector_close")),
-                    _to_float_or_none(row.get("sector_log_return")),
-                    _to_float_or_none(row.get("sector_rolling_vol_20d")),
-                    _to_float_or_none(row.get("sector_momentum_5d")),
-                    _to_float_or_none(row.get("ticker_minus_sector_log_return")),
-                    _to_float_or_none(row.get("ticker_minus_sector_momentum_5d")),
-                    int(row["target_up"]),
-                )
-            )
-
+        columns = [
+            "date", "ticker", "close", "volume", "log_return", "rolling_vol_20d", "rsi_14",
+            "ma_ratio", "ticker_momentum_5d", "vix_close", "fear_greed_score", "sector", "sector_etf",
+            "sector_close", "sector_log_return", "sector_rolling_vol_20d", "sector_momentum_5d",
+            "ticker_minus_sector_log_return", "ticker_minus_sector_momentum_5d", "target_up",
+        ]
+        rows = df[columns].itertuples(index=False, name=None)
         total_inserted = 0
-        for i in range(0, len(values), batch_size):
-            batch = values[i : i + batch_size]
+        while True:
+            raw_batch = list(itertools.islice(rows, batch_size))
+            if not raw_batch:
+                break
+            batch = [
+                (
+                    row[0], row[1], float(row[2]), _to_int_or_zero(row[3]),
+                    *[_to_float_or_none(value) for value in row[4:11]],
+                    str(row[11]), str(row[12]),
+                    *[_to_float_or_none(value) for value in row[13:19]], int(row[19]),
+                )
+                for row in raw_batch
+            ]
             cursor.executemany(insert_query, batch)
             connection.commit()
             total_inserted += len(batch)
-            print(f"  {total_inserted}/{len(values)} lignes insérées...")
+            print(f"  {total_inserted}/{len(df)} lignes insérées...")
         print(f"{total_inserted} lignes insérées/mises à jour avec succès.")
-    except Error as e:
-        print(f"Erreur lors de l'insertion des données: {e}")
+    except Exception as e:
+        connection.rollback()
+        raise RuntimeError(f"Erreur lors de l'insertion des données: {e}") from e
+    finally:
+        cursor.close()
 
 
-def validate_data_xs(connection) -> None:
+def validate_data_xs(connection, table_name="market_data_xs") -> None:
+    if not table_name.replace("_", "").isalnum():
+        raise ValueError("Nom de table invalide")
     try:
         cursor = connection.cursor()
-        cursor.execute("SELECT COUNT(*) FROM market_data_xs")
+        cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
         print(f"Nombre total de lignes: {cursor.fetchone()[0]}")
-        cursor.execute("SELECT COUNT(DISTINCT ticker) FROM market_data_xs")
+        cursor.execute(f"SELECT COUNT(DISTINCT ticker) FROM {table_name}")
         print(f"Nombre de tickers: {cursor.fetchone()[0]}")
-        cursor.execute("SELECT COUNT(*) FROM market_data_xs WHERE vix_close IS NOT NULL")
+        cursor.execute(f"SELECT COUNT(*) FROM {table_name} WHERE vix_close IS NOT NULL")
         print(f"Lignes avec VIX renseigné: {cursor.fetchone()[0]}")
-        cursor.execute("SELECT COUNT(*) FROM market_data_xs WHERE sector_etf IS NOT NULL")
+        cursor.execute(f"SELECT COUNT(*) FROM {table_name} WHERE sector_etf IS NOT NULL")
         print(f"Lignes avec secteur/ETF renseigné: {cursor.fetchone()[0]}")
         cursor.execute(
             """
             SELECT ticker, sector, sector_etf, date, log_return, sector_log_return,
                    ticker_minus_sector_log_return
-            FROM market_data_xs
+            FROM {table_name}
             ORDER BY date DESC, ticker ASC
             LIMIT 5
-            """
+            """.format(table_name=table_name)
         )
         print("\nExemple des 5 dernières lignes enrichies secteur:")
         for row in cursor.fetchall():
             print(row)
     except Error as e:
-        print(f"Erreur lors de la validation des données: {e}")
+        raise RuntimeError(f"Erreur lors de la validation des données: {e}") from e
+    finally:
+        if 'cursor' in locals():
+            cursor.close()
 
 
 def preprocess_to_staging_xs(
@@ -440,6 +452,7 @@ def preprocess_to_staging_xs(
     horizon: int = 1,
     sector_etfs_file: str = "sector_etfs.csv",
     sector_map_file: str = "ticker_sector_map.csv",
+    max_tickers: Optional[int] = None,
 ) -> None:
     print("Récupération des actions depuis le bucket raw...")
     stocks_df = get_stocks_from_raw(endpoint_url, bucket_raw, stocks_file)
@@ -459,17 +472,36 @@ def preprocess_to_staging_xs(
         sector_etfs_df=sector_etfs_df,
         sector_map_df=sector_map_df,
         horizon=horizon,
+        max_tickers=max_tickers,
     )
 
     print("Connexion à MySQL...")
     connection = create_mysql_connection(db_host, db_user, db_password, "staging")
-    if connection is None:
-        return
-
-    create_table_xs(connection)
-    insert_data_xs(connection, merged)
-    validate_data_xs(connection)
-    connection.close()
+    temporary_table = f"market_data_xs_load_{uuid.uuid4().hex}"
+    backup_table = f"market_data_xs_backup_{uuid.uuid4().hex}"
+    try:
+        create_table_xs(connection)
+        cursor = connection.cursor()
+        cursor.execute(f"CREATE TABLE {temporary_table} LIKE market_data_xs")
+        connection.commit()
+        cursor.close()
+        insert_data_xs(connection, merged, table_name=temporary_table)
+        validate_data_xs(connection, table_name=temporary_table)
+        cursor = connection.cursor()
+        cursor.execute(
+            f"RENAME TABLE market_data_xs TO {backup_table}, {temporary_table} TO market_data_xs"
+        )
+        cursor.execute(f"DROP TABLE {backup_table}")
+        connection.commit()
+        cursor.close()
+    finally:
+        try:
+            cursor = connection.cursor()
+            cursor.execute(f"DROP TABLE IF EXISTS {temporary_table}")
+            connection.commit()
+            cursor.close()
+        finally:
+            connection.close()
     print("\nTraitement terminé.")
 
 
@@ -484,6 +516,7 @@ if __name__ == "__main__":
     parser.add_argument("--horizon", type=int, default=1, help="Horizon du label en jours de bourse")
     parser.add_argument("--sector_etfs_file", type=str, default="sector_etfs.csv")
     parser.add_argument("--sector_map_file", type=str, default="ticker_sector_map.csv")
+    parser.add_argument("--max_tickers", type=int, default=None)
     args = parser.parse_args()
 
     preprocess_to_staging_xs(
@@ -496,4 +529,5 @@ if __name__ == "__main__":
         args.horizon,
         args.sector_etfs_file,
         args.sector_map_file,
+        args.max_tickers,
     )

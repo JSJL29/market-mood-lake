@@ -9,6 +9,7 @@ séquences dans MongoDB curated.market_sequences_xs.
 from __future__ import annotations
 
 import argparse
+import uuid
 from datetime import datetime, timezone
 
 import mysql.connector
@@ -16,6 +17,7 @@ import numpy as np
 import pandas as pd
 from numpy.lib.stride_tricks import sliding_window_view
 from pymongo import MongoClient
+from src.transform.process_to_curated import valid_window_mask
 
 
 # Ordre OFFICIEL des features stockées dans chaque document MongoDB.
@@ -39,32 +41,36 @@ FEATURE_COLUMNS = [
 
 def get_mysql_data_xs(host: str, user: str, password: str, database: str) -> pd.DataFrame | None:
     """Récupère les données cross-sectional depuis MySQL, triées ticker/date."""
+    connection = None
     try:
         connection = mysql.connector.connect(host=host, user=user, password=password, database=database)
         query = "SELECT * FROM market_data_xs ORDER BY ticker ASC, date ASC"
         df = pd.read_sql(query, connection)
-        connection.close()
         return df
     except Exception as e:
-        print(f"Erreur lors de la récupération des données MySQL: {e}")
-        return None
+        raise RuntimeError(f"Erreur lors de la récupération des données MySQL: {e}") from e
+    finally:
+        if connection is not None and connection.is_connected():
+            connection.close()
 
 
 def _windows_for_group(feature_matrix: np.ndarray, window_size: int) -> np.ndarray:
     """Fenêtrage vectorisé pour un seul ticker."""
     n = len(feature_matrix)
-    if n <= window_size:
+    if n < window_size:
         return np.empty((0, window_size, feature_matrix.shape[1]), dtype=np.float32)
     windows = sliding_window_view(feature_matrix, window_size, axis=0)
     windows = windows.transpose(0, 2, 1)
-    return windows[:-1]
+    return windows
 
 
-def build_documents_for_ticker(ticker: str, group: pd.DataFrame, window_size: int) -> list[dict]:
+def build_documents_for_ticker(
+    ticker: str, group: pd.DataFrame, window_size: int, max_sequences: int | None = None
+) -> list[dict]:
     """Construit les documents MongoDB pour un seul ticker."""
     group = group.sort_values("date").reset_index(drop=True)
     n = len(group)
-    if n <= window_size:
+    if n < window_size:
         return []
 
     feature_matrix = group[FEATURE_COLUMNS].astype(np.float32).values
@@ -72,13 +78,23 @@ def build_documents_for_ticker(ticker: str, group: pd.DataFrame, window_size: in
     if len(windows) == 0:
         return []
 
-    labels = group["target_up"].values[window_size:n].astype(int)
-    dates = group["date"].values[window_size:n]
+    labels = group["target_up"].values[window_size - 1:n].astype(int)
+    dates = group["date"].values[window_size - 1:n]
+    valid = valid_window_mask(group["date"].values, window_size)
+    windows, labels, dates = windows[valid], labels[valid], dates[valid]
+    end_indices = np.arange(window_size - 1, n)[valid]
+    if max_sequences is not None:
+        if max_sequences < 1:
+            raise ValueError("max_sequences doit être supérieur ou égal à 1")
+        windows = windows[-max_sequences:]
+        labels = labels[-max_sequences:]
+        dates = dates[-max_sequences:]
+        end_indices = end_indices[-max_sequences:]
     processed_at = datetime.now(timezone.utc).isoformat()
 
     documents = []
     for k in range(len(windows)):
-        row = group.iloc[window_size + k]
+        row = group.iloc[end_indices[k]]
         documents.append(
             {
                 "ticker": ticker,
@@ -103,6 +119,7 @@ def process_all_tickers_streaming(
     window_size: int,
     mongo_uri: str,
     insert_batch_size: int = 5000,
+    max_sequences_per_ticker: int | None = None,
 ) -> int:
     """Traite ticker par ticker pour garder un pic mémoire borné."""
     missing_cols = [col for col in FEATURE_COLUMNS + ["target_up"] if col not in df.columns]
@@ -114,39 +131,49 @@ def process_all_tickers_streaming(
 
     df = df.dropna(subset=FEATURE_COLUMNS + ["target_up"]).reset_index(drop=True)
     client = MongoClient(mongo_uri)
-    collection = client.curated.market_sequences_xs
-    collection.delete_many({})
+    temporary_name = f"market_sequences_xs__tmp_{uuid.uuid4().hex}"
+    collection = client.curated[temporary_name]
 
     tickers = df["ticker"].unique()
     total_inserted = 0
     example_docs: list[dict] = []
 
-    for idx, ticker in enumerate(tickers, start=1):
-        group = df[df["ticker"] == ticker]
-        documents = build_documents_for_ticker(ticker, group, window_size)
-        if documents:
-            for i in range(0, len(documents), insert_batch_size):
-                batch = documents[i : i + insert_batch_size]
-                result = collection.insert_many(batch)
-                total_inserted += len(result.inserted_ids)
-            if len(example_docs) < 2:
-                example_docs.extend(documents[: 2 - len(example_docs)])
+    try:
+        for idx, (ticker, group) in enumerate(df.groupby("ticker", sort=False), start=1):
+            documents = build_documents_for_ticker(
+                ticker, group, window_size, max_sequences=max_sequences_per_ticker
+            )
+            if documents:
+                for i in range(0, len(documents), insert_batch_size):
+                    batch = documents[i : i + insert_batch_size]
+                    result = collection.insert_many(batch)
+                    total_inserted += len(result.inserted_ids)
+                if len(example_docs) < 2:
+                    example_docs.extend(documents[: 2 - len(example_docs)])
 
-        if idx % 25 == 0 or idx == len(tickers):
-            print(f"  Ticker {idx}/{len(tickers)} ({ticker}) traité — {total_inserted} documents insérés au total")
+            if idx % 25 == 0 or idx == len(tickers):
+                print(f"  Ticker {idx}/{len(tickers)} ({ticker}) traité — {total_inserted} documents insérés au total")
+            del documents, group
 
-        del documents, group
+        print(f"\nNombre total de documents insérés: {total_inserted}")
+        print("\nExemple de documents insérés:")
+        for doc in example_docs:
+            print(f"\nTicker: {doc['ticker']} - Window end date: {doc['window_end_date']}")
+            print(f"Label (hausse=1/baisse=0): {doc['label']}")
+            print(f"Shape de la fenêtre: {len(doc['features'])}x{len(doc['features'][0])}")
+            print(f"Colonnes features: {doc['metadata']['feature_columns']}")
 
-    print(f"\nNombre total de documents insérés: {total_inserted}")
-    print("\nExemple de documents insérés:")
-    for doc in example_docs:
-        print(f"\nTicker: {doc['ticker']} - Window end date: {doc['window_end_date']}")
-        print(f"Label (hausse=1/baisse=0): {doc['label']}")
-        print(f"Shape de la fenêtre: {len(doc['features'])}x{len(doc['features'][0])}")
-        print(f"Colonnes features: {doc['metadata']['feature_columns']}")
-
-    client.close()
-    return total_inserted
+        if total_inserted == 0 or collection.count_documents({}) != total_inserted:
+            raise RuntimeError("Validation du chargement MongoDB XS temporaire échouée")
+        collection.create_index([("ticker", 1), ("window_end_date", 1)], unique=True)
+        collection.rename("market_sequences_xs", dropTarget=True)
+        return total_inserted
+    finally:
+        try:
+            if temporary_name in client.curated.list_collection_names():
+                client.curated[temporary_name].drop()
+        finally:
+            client.close()
 
 
 def main() -> None:
@@ -156,22 +183,25 @@ def main() -> None:
     parser.add_argument("--mysql_password", type=str, default="root", help="Mot de passe MySQL")
     parser.add_argument("--mongo_uri", type=str, default="mongodb://localhost:27017/", help="URI MongoDB")
     parser.add_argument("--window_size", type=int, default=30, help="Taille de fenêtre glissante")
+    parser.add_argument("--max_sequences_per_ticker", type=int, default=None)
     args = parser.parse_args()
 
     print("Récupération des données depuis MySQL (market_data_xs)...")
     df = get_mysql_data_xs(args.mysql_host, args.mysql_user, args.mysql_password, "staging")
-    if df is None or df.empty:
-        print("Aucune donnée récupérée depuis MySQL")
-        return
+    if df.empty:
+        raise RuntimeError("Aucune donnée récupérée depuis MySQL")
 
     print(f"Nombre de lignes récupérées: {len(df)} ({df['ticker'].nunique()} tickers)")
     print(f"\nConstruction et insertion des séquences par ticker (fenêtre = {args.window_size} jours)...")
-    total = process_all_tickers_streaming(df, args.window_size, args.mongo_uri)
+    total = process_all_tickers_streaming(
+        df, args.window_size, args.mongo_uri,
+        max_sequences_per_ticker=args.max_sequences_per_ticker,
+    )
 
     if total > 0:
         print("\nTraitement terminé avec succès!")
     else:
-        print("\nErreur lors du traitement : aucun document inséré")
+        raise RuntimeError("Aucun document cross-sectional inséré dans MongoDB")
 
 
 if __name__ == "__main__":

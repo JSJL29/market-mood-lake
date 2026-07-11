@@ -1,6 +1,7 @@
 import io
 import json
 import argparse
+from pathlib import Path
 from datetime import datetime, timezone
 
 import requests
@@ -19,10 +20,30 @@ class MarketMoodAPI:
     # dont le flux CNN lui-même pour la période récente.
     FEAR_GREED_HISTORY_URL = "https://raw.githubusercontent.com/whit3rabbit/fear-greed-data/main/fear-greed.csv"
     FEAR_GREED_CNN_URL = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
+    VIX_HISTORY_URL = "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
 
     @staticmethod
-    def get_vix(period="5d"):
-        """Récupère les dernières valeurs de clôture du VIX."""
+    def get_vix(period="5d", start_date=None):
+        """Récupère le VIX, avec l'historique officiel Cboe en priorité."""
+        if start_date or period == "max":
+            response = requests.get(MarketMoodAPI.VIX_HISTORY_URL, timeout=30)
+            response.raise_for_status()
+            cboe = pd.read_csv(io.StringIO(response.text))
+            cboe.columns = [column.strip().lower() for column in cboe.columns]
+            cboe["date"] = pd.to_datetime(cboe["date"], format="%m/%d/%Y", errors="coerce")
+            cboe = cboe.dropna(subset=["date", "close"])
+            if start_date:
+                cboe = cboe[cboe["date"] >= pd.Timestamp(start_date)]
+            return [
+                {
+                    "date": row["date"].strftime("%Y-%m-%d"),
+                    "vix_close": float(row["close"]),
+                    "vix_high": float(row["high"]),
+                    "vix_low": float(row["low"]),
+                }
+                for _, row in cboe.iterrows()
+            ]
+
         vix = yf.Ticker("^VIX")
         hist = vix.history(period=period)
 
@@ -115,12 +136,16 @@ def main():
     parser.add_argument('--bucket_name', type=str, default='raw', help='Nom du bucket S3 raw')
     parser.add_argument('--endpoint-url', type=str, default='http://localhost:4566',
                          help='URL du endpoint S3 (LocalStack)')
+    parser.add_argument('--output-path', type=Path, default=None,
+                         help='Snapshot JSON local suivi par DVC')
     args = parser.parse_args()
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
 
     print("Récupération du VIX...")
-    vix_records = MarketMoodAPI.get_vix(args.period)
+    vix_records = MarketMoodAPI.get_vix(args.period, args.start_date)
+    if not vix_records:
+        raise RuntimeError("Aucune donnée VIX récupérée")
 
     print("Récupération du Fear & Greed Index...")
     try:
@@ -129,11 +154,22 @@ def main():
         print(f"Fear & Greed indisponible ({e}), poursuite avec le VIX seul.")
         fg_records = []
 
+    if not fg_records:
+        raise RuntimeError("Aucune donnée Fear & Greed récupérée")
+
     payload = {
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "vix": vix_records,
         "fear_greed": fg_records,
     }
+
+    if args.output_path:
+        args.output_path.parent.mkdir(parents=True, exist_ok=True)
+        args.output_path.write_text(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        print(f"Snapshot market mood écrit dans {args.output_path}")
 
     upload_to_s3(payload, args.bucket_name, f"market_mood_{timestamp}.json", args.endpoint_url)
 

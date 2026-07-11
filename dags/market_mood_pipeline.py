@@ -1,6 +1,7 @@
 from airflow import DAG
 from airflow.operators.bash import BashOperator
 from datetime import datetime, timedelta
+import os
 
 default_args = {
     "owner": "airflow",
@@ -27,7 +28,26 @@ aws_env = {
     "AWS_DEFAULT_REGION": "us-east-1",
 }
 
-# Tâche 0 : prépare la zone raw automatiquement
+RAW_BUCKET = os.getenv("RAW_BUCKET", "raw")
+MARKET_START_DATE = os.getenv("MARKET_START_DATE", "2015-01-01")
+LABEL_HORIZON = int(os.getenv("LABEL_HORIZON", "1"))
+WINDOW_SIZE = int(os.getenv("WINDOW_SIZE", "30"))
+XS_MAX_TICKERS = int(os.getenv("XS_MAX_TICKERS", "50"))
+XS_MAX_SEQUENCES_PER_TICKER = int(os.getenv("XS_MAX_SEQUENCES_PER_TICKER", "1000"))
+
+# Tâche 0 : acquiert le CSV (téléchargement configurable ou fichier local).
+acquire_historical_source = BashOperator(
+    task_id="acquire_historical_source",
+    bash_command=(
+        "python /opt/airflow/scripts_tools/acquire_historical_data.py "
+        "--destination /opt/airflow/data/kaggle_stocks/SP500_Historical_Data.csv"
+    ),
+    env=aws_env,
+    append_env=True,
+    dag=dag,
+)
+
+# Tâche 1 : prépare la zone raw automatiquement
 # - crée le bucket raw si absent
 # - génère / upload sp500_combined.csv depuis data/kaggle_stocks/SP500_Historical_Data.csv
 init_raw_sp500 = BashOperator(
@@ -62,16 +82,11 @@ PY
 
 echo "Vérification du fichier source S&P500..."
 
-if [ ! -f "/opt/airflow/data/kaggle_stocks/SP500_Historical_Data.csv" ]; then
-  echo "ERREUR: fichier manquant: /opt/airflow/data/kaggle_stocks/SP500_Historical_Data.csv"
-  echo "Place ton CSV Kaggle dans: data/kaggle_stocks/SP500_Historical_Data.csv"
-  exit 1
-fi
-
 echo "Création / upload de sp500_combined.csv vers s3://raw..."
 
 python /opt/airflow/build/unpack_to_raw.py \
   --input_dir /opt/airflow/data/kaggle_stocks \
+  --input_file /opt/airflow/data/kaggle_stocks/SP500_Historical_Data.csv \
   --bucket_name raw \
   --output_file_name sp500_combined.csv \
   --endpoint-url http://localstack:4566
@@ -102,9 +117,10 @@ fetch_market_mood = BashOperator(
     task_id="fetch_market_mood",
     bash_command=(
         "python /opt/airflow/scripts/ingestion/market_api.py "
+        f"--bucket_name {RAW_BUCKET} "
         "--endpoint-url http://localstack:4566 "
         "--period max "
-        "--start_date 2015-01-01"
+        f"--start_date {MARKET_START_DATE}"
     ),
     env=aws_env,
     dag=dag,
@@ -115,12 +131,13 @@ preprocess_to_staging = BashOperator(
     task_id="preprocess_to_staging",
     bash_command=(
         "python /opt/airflow/scripts/transform/preprocess_to_staging.py "
-        "--bucket_raw raw "
+        f"--bucket_raw {RAW_BUCKET} "
         "--sp500_file sp500_combined.csv "
         "--db_host mysql "
         "--db_user root "
         "--db_password root "
-        "--endpoint-url http://localstack:4566"
+        "--endpoint-url http://localstack:4566 "
+        f"--horizon {LABEL_HORIZON}"
     ),
     env=aws_env,
     dag=dag,
@@ -135,9 +152,44 @@ process_to_curated = BashOperator(
         "--mysql_user root "
         "--mysql_password root "
         "--mongo_uri mongodb://mongodb:27017/ "
-        "--window_size 30"
+        f"--window_size {WINDOW_SIZE}"
     ),
     dag=dag,
 )
 
-init_raw_sp500 >> fetch_market_mood >> preprocess_to_staging >> process_to_curated
+# La même exécution Airflow publie également la voie cross-sectional utilisée
+# par DVC. Les limites évitent qu'une exécution d'évaluation sature la machine.
+preprocess_to_staging_xs = BashOperator(
+    task_id="preprocess_to_staging_xs",
+    bash_command=(
+        "cd /opt/airflow && python -m src.transform.preprocess_to_staging_xs "
+        f"--bucket_raw {RAW_BUCKET} "
+        "--stocks_file sp500_combined.csv "
+        "--db_host mysql "
+        "--db_user root "
+        "--db_password root "
+        "--endpoint-url http://localstack:4566 "
+        f"--horizon {LABEL_HORIZON} "
+        f"--max_tickers {XS_MAX_TICKERS}"
+    ),
+    env=aws_env,
+    dag=dag,
+)
+
+process_to_curated_xs = BashOperator(
+    task_id="process_to_curated_xs",
+    bash_command=(
+        "cd /opt/airflow && python -m src.transform.process_to_curated_xs "
+        "--mysql_host mysql "
+        "--mysql_user root "
+        "--mysql_password root "
+        "--mongo_uri mongodb://mongodb:27017/ "
+        f"--window_size {WINDOW_SIZE} "
+        f"--max_sequences_per_ticker {XS_MAX_SEQUENCES_PER_TICKER}"
+    ),
+    dag=dag,
+)
+
+acquire_historical_source >> init_raw_sp500 >> fetch_market_mood
+fetch_market_mood >> preprocess_to_staging >> process_to_curated
+fetch_market_mood >> preprocess_to_staging_xs >> process_to_curated_xs

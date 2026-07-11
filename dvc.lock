@@ -1,0 +1,196 @@
+schema: '2.0'
+stages:
+  unpack_to_raw:
+    cmd: "export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1
+      && test -f data/kaggle_stocks/SP500_Historical_Data.csv && python scripts/create_raw_bucket.py
+      --endpoint-url http://localhost:4566 --bucket raw && python build/unpack_to_raw.py
+      --input_dir data/kaggle_stocks --input_file data/kaggle_stocks/SP500_Historical_Data.csv
+      --bucket_name raw --output_file_name sp500_combined.csv --endpoint-url http://localhost:4566
+      --local-output data/raw_snapshot/sp500_combined.csv\n"
+    deps:
+    - path: build/unpack_to_raw.py
+      hash: md5
+      md5: d3cba69aea55863f2d6b32bc044ed552
+      size: 4958
+    - path: data/kaggle_stocks/SP500_Historical_Data.csv
+      hash: md5
+      md5: 85f54581466575fad013033a04ee2916
+      size: 93611
+    - path: params.yaml
+      hash: md5
+      md5: 35f3f00031e61ae40af1f39fb6105adc
+      size: 606
+    - path: scripts/create_raw_bucket.py
+      hash: md5
+      md5: 13135ddbc75d3d3ca75303125fac5730
+      size: 1624
+    outs:
+    - path: data/raw_snapshot/sp500_combined.csv
+      hash: md5
+      md5: fcbfb9b4d03b3581ce7dd2daadb5dd66
+      size: 91261
+      isexec: true
+  fetch_market_mood:
+    cmd: "export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1
+      && python src/ingestion/market_api.py --bucket_name raw --endpoint-url http://localhost:4566
+      --period max --start_date 2015-01-01 --output-path data/raw_snapshot/market_mood.json\n"
+    deps:
+    - path: data/raw_snapshot/sp500_combined.csv
+      hash: md5
+      md5: fcbfb9b4d03b3581ce7dd2daadb5dd66
+      size: 91261
+    - path: params.yaml
+      hash: md5
+      md5: 35f3f00031e61ae40af1f39fb6105adc
+      size: 606
+    - path: src/ingestion/market_api.py
+      hash: md5
+      md5: 6c728f153c2385efad9665e43ff4a8e9
+      size: 7223
+    outs:
+    - path: data/raw_snapshot/market_mood.json
+      hash: md5
+      md5: d17b54ed13d4a57246d991e47dac54fd
+      size: 360530
+      isexec: true
+  preprocess_to_staging:
+    cmd: "python src/transform/preprocess_to_staging.py --bucket_raw raw --sp500_file
+      sp500_combined.csv --db_host localhost --db_user root --db_password root --endpoint-url
+      http://localhost:4566 --horizon 1 && date -u +\"%Y-%m-%dT%H:%M:%SZ\" > data/.pipeline_state/staging_ready.txt\n"
+    deps:
+    - path: data/.pipeline_state/market_mood_ready.txt
+      hash: md5
+      md5: 5cefa7ab4a1a1de24810570201b369e1
+      size: 21
+      isexec: true
+    - path: data/.pipeline_state/raw_ready.txt
+      hash: md5
+      md5: 2ec824810fe722fc871ce94a10b5053b
+      size: 21
+      isexec: true
+    - path: params.yaml
+      hash: md5
+      md5: 8641e529c1e438d7c51036c05bf7c935
+      size: 527
+      isexec: true
+    - path: src/transform/preprocess_to_staging.py
+      hash: md5
+      md5: 3be32a2d97851caef6ad245f998567e8
+      size: 11207
+      isexec: true
+    outs:
+    - path: data/.pipeline_state/staging_ready.txt
+      hash: md5
+      md5: 6a1749f41e141b11367da16ec53d55cd
+      size: 21
+      isexec: true
+  process_to_curated:
+    cmd: "python src/transform/process_to_curated.py --mysql_host localhost --mysql_user
+      root --mysql_password root --mongo_uri mongodb://localhost:27017/ --window_size
+      30 && date -u +\"%Y-%m-%dT%H:%M:%SZ\" > data/.pipeline_state/curated_ready.txt\n"
+    deps:
+    - path: data/.pipeline_state/staging_ready.txt
+      hash: md5
+      md5: 6a1749f41e141b11367da16ec53d55cd
+      size: 21
+      isexec: true
+    - path: params.yaml
+      hash: md5
+      md5: 8641e529c1e438d7c51036c05bf7c935
+      size: 527
+      isexec: true
+    - path: src/transform/process_to_curated.py
+      hash: md5
+      md5: ca4de595d1f997628db257f0db6a051e
+      size: 5215
+      isexec: true
+    outs:
+    - path: data/.pipeline_state/curated_ready.txt
+      hash: md5
+      md5: ca0a01d018ceabfbb8d81444a2c9879a
+      size: 21
+      isexec: true
+  preprocess_to_staging_xs:
+    cmd: "export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1
+      && python -m src.transform.preprocess_to_staging_xs --bucket_raw raw --stocks_file
+      sp500_combined.csv --db_host localhost --db_user root --db_password root --endpoint-url
+      http://localhost:4566 --horizon 1 --max_tickers 50 && python scripts/snapshot_databases.py
+      --kind mysql --mysql-host localhost --mysql-user root --mysql-password root
+      --table market_data_xs --output data/versioned_snapshots/market_data_xs.csv.gz\n"
+    deps:
+    - path: data/raw_snapshot/market_mood.json
+      hash: md5
+      md5: d17b54ed13d4a57246d991e47dac54fd
+      size: 360530
+    - path: data/raw_snapshot/sp500_combined.csv
+      hash: md5
+      md5: fcbfb9b4d03b3581ce7dd2daadb5dd66
+      size: 91261
+    - path: params.yaml
+      hash: md5
+      md5: 35f3f00031e61ae40af1f39fb6105adc
+      size: 606
+    - path: scripts/snapshot_databases.py
+      hash: md5
+      md5: 7b546f5364a018f0d87ceb3405eb6838
+      size: 3270
+    - path: src/transform/preprocess_to_staging.py
+      hash: md5
+      md5: 59cf12229d47686c2a604d28ea3d0516
+      size: 15098
+    - path: src/transform/preprocess_to_staging_xs.py
+      hash: md5
+      md5: fe93cfa0505316d29ba71b9814d897f1
+      size: 22359
+    outs:
+    - path: data/versioned_snapshots/market_data_xs.csv.gz
+      hash: md5
+      md5: 09ba5f7f0781882465370d01c809f9ce
+      size: 98154
+      isexec: true
+  acquire_historical_source:
+    cmd: "python scripts/acquire_historical_data.py --destination data/kaggle_stocks/SP500_Historical_Data.csv\n"
+    deps:
+    - path: params.yaml
+      hash: md5
+      md5: 35f3f00031e61ae40af1f39fb6105adc
+      size: 606
+    - path: scripts/acquire_historical_data.py
+      hash: md5
+      md5: 7819a1a59ed6ddb1a26e0230b78e6474
+      size: 4685
+    outs:
+    - path: data/kaggle_stocks/SP500_Historical_Data.csv
+      hash: md5
+      md5: 85f54581466575fad013033a04ee2916
+      size: 93611
+      isexec: true
+  process_to_curated_xs:
+    cmd: "python -m src.transform.process_to_curated_xs --mysql_host localhost --mysql_user
+      root --mysql_password root --mongo_uri mongodb://localhost:27017/ --window_size
+      30 --max_sequences_per_ticker 1000 && python scripts/snapshot_databases.py --kind
+      mongo --mongo-uri mongodb://localhost:27017/ --collection market_sequences_xs
+      --output data/versioned_snapshots/market_sequences_xs.jsonl.gz\n"
+    deps:
+    - path: data/versioned_snapshots/market_data_xs.csv.gz
+      hash: md5
+      md5: 09ba5f7f0781882465370d01c809f9ce
+      size: 98154
+    - path: params.yaml
+      hash: md5
+      md5: 35f3f00031e61ae40af1f39fb6105adc
+      size: 606
+    - path: scripts/snapshot_databases.py
+      hash: md5
+      md5: 7b546f5364a018f0d87ceb3405eb6838
+      size: 3270
+    - path: src/transform/process_to_curated_xs.py
+      hash: md5
+      md5: 0a06fe1a34e305d7c2b44c831456aa0a
+      size: 8655
+    outs:
+    - path: data/versioned_snapshots/market_sequences_xs.jsonl.gz
+      hash: md5
+      md5: e205581dc958301308fddee903e6b9e3
+      size: 173099
+      isexec: true

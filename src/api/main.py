@@ -1,10 +1,11 @@
 import os
-from datetime import datetime
+from datetime import date, datetime
 from typing import List, Optional
 
 import boto3
 import mysql.connector
 from fastapi import FastAPI, HTTPException, Query
+from botocore.config import Config
 from pymongo import MongoClient
 
 from src.api.routes_ingest import router as ingest_router
@@ -18,15 +19,17 @@ class DatabaseConnections:
         self.s3_client = boto3.client(
             "s3",
             endpoint_url=os.getenv("S3_ENDPOINT_URL", "http://localstack:4566"),
+            config=Config(connect_timeout=3, read_timeout=5, retries={"max_attempts": 1}),
         )
         self.mysql_config = {
             "host": os.getenv("MYSQL_HOST", "mysql"),
             "user": os.getenv("MYSQL_USER", "root"),
             "password": os.getenv("MYSQL_PASSWORD", "root"),
             "database": os.getenv("MYSQL_DATABASE", "staging"),
+            "connection_timeout": 5,
         }
         self.mongo_uri = os.getenv("MONGO_URI", "mongodb://mongodb:27017/")
-        self.mongo_client = MongoClient(self.mongo_uri)
+        self.mongo_client = MongoClient(self.mongo_uri, serverSelectionTimeoutMS=5000)
         self.mongo_db = self.mongo_client[os.getenv("MONGO_DB", "curated")]
 
 
@@ -39,6 +42,7 @@ def _iso(value):
 
 def _mysql_scalar(query: str, params=None):
     conn = mysql.connector.connect(**db.mysql_config)
+    cursor = None
     try:
         cursor = conn.cursor()
         cursor.execute(query, params or [])
@@ -46,20 +50,30 @@ def _mysql_scalar(query: str, params=None):
         return row[0] if row else None
     finally:
         try:
-            cursor.close()
+            if cursor is not None:
+                cursor.close()
         finally:
             conn.close()
 
 
+def _s3_objects(bucket: str, max_items: int | None = None):
+    objects = []
+    paginator = db.s3_client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket):
+        objects.extend(page.get("Contents", []))
+        if max_items is not None and len(objects) >= max_items:
+            return objects[:max_items]
+    return objects
+
+
 @app.get("/raw/", response_model=List[dict])
-async def get_raw_data(
+def get_raw_data(
     bucket: Optional[str] = Query("raw", description="Nom du bucket S3"),
     limit: Optional[int] = Query(10, ge=1, le=1000, description="Nombre maximum d'objets à lister"),
 ):
     """Liste les objets disponibles dans la zone raw S3."""
     try:
-        response = db.s3_client.list_objects_v2(Bucket=bucket)
-        contents = response.get("Contents", [])[:limit]
+        contents = _s3_objects(bucket, limit)
         return [
             {
                 "key": obj["Key"],
@@ -73,16 +87,19 @@ async def get_raw_data(
 
 
 @app.get("/staging/", response_model=List[dict])
-async def get_staging_data(
-    start_date: Optional[str] = Query(None, description="Date de début YYYY-MM-DD"),
-    end_date: Optional[str] = Query(None, description="Date de fin YYYY-MM-DD"),
+def get_staging_data(
+    start_date: Optional[date] = Query(None, description="Date de début YYYY-MM-DD"),
+    end_date: Optional[date] = Query(None, description="Date de fin YYYY-MM-DD"),
     limit: Optional[int] = Query(100, ge=1, le=5000, description="Nombre maximum de lignes"),
-    table: Optional[str] = Query("market_data", description="market_data ou market_data_xs"),
+    table: Optional[str] = Query("market_data", description="Table Staging autorisée"),
 ):
     """Récupère les données staging depuis MySQL."""
-    if table not in {"market_data", "market_data_xs"}:
-        raise HTTPException(status_code=400, detail="table doit valoir market_data ou market_data_xs")
+    allowed_tables = {"market_data", "market_data_xs", "market_data_ingest"}
+    if table not in allowed_tables:
+        raise HTTPException(status_code=400, detail=f"table doit être dans {sorted(allowed_tables)}")
 
+    conn = None
+    cursor = None
     try:
         conn = mysql.connector.connect(**db.mysql_config)
         cursor = conn.cursor(dictionary=True)
@@ -98,51 +115,49 @@ async def get_staging_data(
         params.append(limit)
         cursor.execute(query, params)
         rows = cursor.fetchall()
-        cursor.close()
-        conn.close()
         for row in rows:
             for key, value in list(row.items()):
                 row[key] = _iso(value)
         return rows
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Erreur lors de la lecture depuis MySQL: {exc}")
+    finally:
+        if cursor is not None:
+            cursor.close()
+        if conn is not None:
+            conn.close()
 
 
 @app.get("/curated/", response_model=List[dict])
-async def get_curated_data(
+def get_curated_data(
     limit: Optional[int] = Query(10, ge=1, le=1000, description="Nombre maximum de documents à retourner"),
-    label: Optional[int] = Query(None, description="Filtrer par label 1=hausse, 0=baisse"),
+    label: Optional[int] = Query(None, ge=0, le=1, description="Filtrer par label 1=hausse, 0=baisse"),
     collection: Optional[str] = Query("market_sequences", description="Collection MongoDB curated"),
 ):
     """Récupère des documents curated depuis MongoDB."""
-    allowed = {"market_sequences", "market_sequences_xs", "model_runs", "benchmark_runs"}
+    allowed = {
+        "market_sequences", "market_sequences_xs", "market_sequences_ingest",
+        "model_runs", "benchmark_runs",
+    }
     if collection not in allowed:
         raise HTTPException(status_code=400, detail=f"collection doit être dans {sorted(allowed)}")
     try:
         query = {}
         if label is not None and collection.startswith("market_sequences"):
             query["label"] = label
+        sort_field = "window_end_date" if collection.startswith("market_sequences") else "created_at"
         docs = list(
             db.mongo_db[collection]
             .find(query, {"_id": 0})
-            .sort("created_at", -1)
+            .sort(sort_field, -1)
             .limit(limit)
         )
-        # Fallback utile pour la démo : si les séquences curated sont vides,
-        # on expose les derniers résultats ML stockés dans model_runs.
-        if not docs and collection == "market_sequences" and label is None:
-            docs = list(
-                db.mongo_db["model_runs"]
-                .find({}, {"_id": 0})
-                .sort("created_at", -1)
-                .limit(limit)
-            )
         return docs
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Erreur lors de la lecture depuis MongoDB: {exc}")
 
 @app.get("/health")
-async def health_check():
+def health_check():
     """Vérifie l'état de l'API et des connexions aux services."""
     status = {
         "api_status": "healthy",
@@ -171,11 +186,13 @@ async def health_check():
         status["connections"]["mongodb"] = False
         status["connections"]["mongodb_error"] = str(exc)
 
+    if not all(status["connections"].get(name, False) for name in ("s3", "mysql", "mongodb")):
+        status["api_status"] = "degraded"
     return status
 
 
 @app.get("/stats")
-async def stats():
+def stats():
     """Métriques de remplissage raw/staging/curated + derniers runs ML/benchmarks."""
     result = {
         "timestamp": datetime.now().isoformat(),
@@ -188,8 +205,7 @@ async def stats():
     }
 
     try:
-        response = db.s3_client.list_objects_v2(Bucket="raw")
-        objects = response.get("Contents", [])
+        objects = _s3_objects("raw")
         latest = max(objects, key=lambda obj: obj["LastModified"]) if objects else None
         result["raw"] = {
             "object_count": len(objects),
@@ -205,7 +221,7 @@ async def stats():
     except Exception as exc:
         result["raw"] = {"error": str(exc)}
 
-    for table in ["market_data", "market_data_xs"]:
+    for table in ["market_data", "market_data_xs", "market_data_ingest"]:
         try:
             row_count = _mysql_scalar(f"SELECT COUNT(*) FROM {table}")
             min_date = _mysql_scalar(f"SELECT MIN(date) FROM {table}")

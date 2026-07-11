@@ -4,6 +4,7 @@ This keeps the original `src.ml.train` usable for experiments while giving Airfl
 an auditable ML step: export -> train -> write `curated.model_runs`.
 """
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -14,10 +15,11 @@ from pathlib import Path
 from typing import Any, Dict
 
 import numpy as np
+import torch
 from pymongo import MongoClient
 
 from src.ml.dataset import load_and_split
-from src.ml.train import run_training, select_features
+from src.ml.train import expected_feature_schema, run_training, select_features, selected_feature_names
 
 def to_mongo_safe(value):
     """
@@ -30,7 +32,10 @@ def to_mongo_safe(value):
         return value.tolist()
 
     if isinstance(value, np.generic):
-        return value.item()
+        value = value.item()
+
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
 
     if isinstance(value, dict):
         return {str(k): to_mongo_safe(v) for k, v in value.items()}
@@ -43,8 +48,9 @@ def to_mongo_safe(value):
 def _jsonable(value: Any) -> Any:
     if isinstance(value, (np.integer,)):
         return int(value)
-    if isinstance(value, (np.floating,)):
-        return float(value)
+    if isinstance(value, (np.floating, float)):
+        value = float(value)
+        return value if np.isfinite(value) else None
     if isinstance(value, np.ndarray):
         return value.tolist()
     return value
@@ -88,9 +94,14 @@ def main() -> None:
     parser.add_argument("--mongo_collection", default="model_runs")
     parser.add_argument("--model_dir", default="models/model_runs")
     parser.add_argument("--run_note", default="")
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     run_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{args.mode}_{uuid.uuid4().hex[:8]}"
+    npz_path = Path(args.npz_path)
+    if not npz_path.is_file():
+        raise FileNotFoundError(f"Snapshot ML introuvable: {npz_path}")
+    dataset_sha256 = hashlib.sha256(npz_path.read_bytes()).hexdigest()
     splits, metadata = load_and_split(args.npz_path)
     dataset_summary = _dataset_summary(splits)
 
@@ -98,11 +109,16 @@ def main() -> None:
     val_feat, val_lab = splits["val"]
     test_feat, test_lab = splits["test"]
 
+    source_schema = metadata.get("feature_names")
+    expected_schema = expected_feature_schema(train_feat)
+    if source_schema is not None and source_schema != expected_schema:
+        raise ValueError(f"Schéma de features inattendu: {source_schema}; attendu: {expected_schema}")
+    feature_names = selected_feature_names(train_feat, args.mode)
     train_feat = select_features(train_feat, args.mode)
     val_feat = select_features(val_feat, args.mode)
     test_feat = select_features(test_feat, args.mode)
 
-    metrics = run_training(
+    metrics, model = run_training(
         train_feat=train_feat,
         train_lab=train_lab,
         val_feat=val_feat,
@@ -119,6 +135,8 @@ def main() -> None:
         lr_patience=args.lr_patience,
         early_stop_patience=args.early_stop_patience,
         verbose=True,
+        seed=args.seed,
+        return_model=True,
     )
 
     now = datetime.now(timezone.utc)
@@ -128,9 +146,11 @@ def main() -> None:
         "model": "GRU",
         "mode": args.mode,
         "npz_path": args.npz_path,
+        "dataset_sha256": dataset_sha256,
         "dataset_metadata": metadata,
         "dataset_summary": dataset_summary,
         "selected_feature_count": int(train_feat.shape[-1]),
+        "selected_feature_names": feature_names,
         "hyperparameters": {
             "epochs": args.epochs,
             "batch_size": args.batch_size,
@@ -140,6 +160,7 @@ def main() -> None:
             "dropout": args.dropout,
             "lr_patience": args.lr_patience,
             "early_stop_patience": args.early_stop_patience,
+            "seed": args.seed,
         },
         "metrics": {key: _jsonable(value) for key, value in metrics.items()},
         "environment": {
@@ -151,11 +172,33 @@ def main() -> None:
     }
 
     Path(args.model_dir).mkdir(parents=True, exist_ok=True)
+    checkpoint_path = Path(args.model_dir) / f"{run_id}.pt"
+    temporary_checkpoint = checkpoint_path.with_suffix(".pt.tmp")
+    torch.save(
+        {
+            "run_id": run_id,
+            "model_state_dict": model.state_dict(),
+            "mode": args.mode,
+            "input_size": int(train_feat.shape[-1]),
+            "feature_names": feature_names,
+            "source_feature_schema": source_schema or expected_schema,
+            "normalization": {"mean": metadata["mean"], "std": metadata["std"]},
+            "dataset_sha256": dataset_sha256,
+            "hyperparameters": document["hyperparameters"],
+        },
+        temporary_checkpoint,
+    )
+    temporary_checkpoint.replace(checkpoint_path)
+    document["checkpoint_path"] = str(checkpoint_path)
+    serializable_document = to_mongo_safe(document)
     artifact_path = Path(args.model_dir) / f"{run_id}.json"
-    artifact_path.write_text(json.dumps(document, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+    artifact_path.write_text(
+        json.dumps(serializable_document, indent=2, ensure_ascii=False, allow_nan=False),
+        encoding="utf-8",
+    )
     print(f"Run artifact écrit: {artifact_path}")
 
-    record_run(args.mongo_uri, args.mongo_db, args.mongo_collection, document)
+    record_run(args.mongo_uri, args.mongo_db, args.mongo_collection, serializable_document)
     print(f"Run enregistré dans MongoDB: {args.mongo_db}.{args.mongo_collection} / {run_id}")
 
 

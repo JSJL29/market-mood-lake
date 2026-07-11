@@ -18,7 +18,7 @@ def get_json(url: str, timeout: float = 5.0):
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--api-url", default="http://localhost:8000")
+    parser.add_argument("--api-url", default="http://127.0.0.1:8000")
     parser.add_argument("--retries", type=int, default=20)
     parser.add_argument("--sleep", type=float, default=1.5)
     args = parser.parse_args()
@@ -28,10 +28,15 @@ def main() -> None:
     for attempt in range(1, args.retries + 1):
         try:
             health = get_json(f"{api_url}/health")
+            connections = health.get("connections", {}) if isinstance(health, dict) else {}
+            if health.get("api_status") != "healthy" or not all(
+                connections.get(name) is True for name in ("s3", "mysql", "mongodb")
+            ):
+                raise RuntimeError(f"healthcheck dégradé: {health}")
             print("/health OK")
             print(json.dumps(health, indent=2, ensure_ascii=False))
             break
-        except (HTTPError, URLError, TimeoutError, ConnectionError) as exc:
+        except (HTTPError, URLError, TimeoutError, ConnectionError, RuntimeError) as exc:
             last_error = exc
             time.sleep(args.sleep)
     else:
@@ -51,6 +56,20 @@ def main() -> None:
         except Exception as exc:
             ok = False
             print(f"{path} ERREUR: {exc}", file=sys.stderr)
+
+    try:
+        stats = get_json(f"{api_url}/stats")
+        required_counts = {
+            "raw": stats.get("raw", {}).get("object_count", 0),
+            "staging": stats.get("staging", {}).get("market_data", {}).get("row_count", 0),
+            "curated": stats.get("curated", {}).get("market_sequences", {}).get("document_count", 0),
+        }
+        if any(value <= 0 for value in required_counts.values()):
+            raise RuntimeError(f"zones incomplètes: {required_counts}")
+        print(f"Volumes critiques OK -> {required_counts}")
+    except Exception as exc:
+        ok = False
+        print(f"Validation des volumes ERREUR: {exc}", file=sys.stderr)
 
     sys.exit(0 if ok else 1)
 

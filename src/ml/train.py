@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import random
 from typing import Iterable
 
 import numpy as np
@@ -121,10 +122,34 @@ def select_features(features: np.ndarray, mode: str) -> np.ndarray:
     feature_index = _feature_index_for(features)
     names = _names_for_mode(feature_index, mode)
     idx = [feature_index[name] for name in names]
+    if mode == "sector_full":
+        sector_idx = [feature_index[name] for name in SECTOR_FEATURES]
+        if np.allclose(features[:, :, sector_idx], 0.0):
+            raise ValueError("Features sectorielles absentes ou entièrement neutres; sector_full refusé")
     return features[:, :, idx].astype(np.float32)
 
 
+def selected_feature_names(features: np.ndarray, mode: str) -> list[str]:
+    feature_index = _feature_index_for(features)
+    return _names_for_mode(feature_index, mode)
+
+
+def expected_feature_schema(features: np.ndarray) -> list[str]:
+    feature_index = _feature_index_for(features)
+    return [name for name, _ in sorted(feature_index.items(), key=lambda item: item[1])]
+
+
+def set_reproducible_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.use_deterministic_algorithms(True, warn_only=True)
+
+
 def safe_auc(y_true: Iterable[float], y_prob: Iterable[float]) -> float:
+    y_true = np.asarray(list(y_true))
+    if np.unique(y_true).size < 2:
+        return float("nan")
     try:
         return float(roc_auc_score(y_true, y_prob))
     except ValueError:
@@ -162,6 +187,11 @@ def majority_baseline(labels: np.ndarray) -> float:
     return max(positive_rate, 1 - positive_rate)
 
 
+def fixed_class_accuracy(labels: np.ndarray, predicted_class: int) -> float:
+    labels = np.asarray(labels).astype(int)
+    return float(np.mean(labels == predicted_class)) if len(labels) else 0.0
+
+
 def run_training(
     train_feat: np.ndarray,
     train_lab: np.ndarray,
@@ -179,10 +209,14 @@ def run_training(
     lr_patience: int = 3,
     early_stop_patience: int = 5,
     verbose: bool = True,
-) -> dict[str, float]:
-    train_baseline = majority_baseline(train_lab)
-    val_baseline = majority_baseline(val_lab)
-    test_baseline = majority_baseline(test_lab)
+    seed: int = 42,
+    return_model: bool = False,
+):
+    set_reproducible_seed(seed)
+    majority_class = int(np.asarray(train_lab).mean() >= 0.5)
+    train_baseline = fixed_class_accuracy(train_lab, majority_class)
+    val_baseline = fixed_class_accuracy(val_lab, majority_class)
+    test_baseline = fixed_class_accuracy(test_lab, majority_class)
 
     if verbose:
         print(
@@ -195,7 +229,11 @@ def run_training(
         )
         print(f"[{mode}] Shape train/val/test : {train_feat.shape} / {val_feat.shape} / {test_feat.shape}")
 
-    train_loader = DataLoader(MarketSequenceDataset(train_feat, train_lab), batch_size=batch_size, shuffle=True)
+    generator = torch.Generator().manual_seed(seed)
+    train_loader = DataLoader(
+        MarketSequenceDataset(train_feat, train_lab), batch_size=batch_size,
+        shuffle=True, generator=generator,
+    )
     val_loader = DataLoader(MarketSequenceDataset(val_feat, val_lab), batch_size=batch_size)
     test_loader = DataLoader(MarketSequenceDataset(test_feat, test_lab), batch_size=batch_size)
 
@@ -274,14 +312,16 @@ def run_training(
             f"({verdict} la baseline test de {test_baseline:.4f})"
         )
 
-    return {
+    metrics = {
         "train_baseline": float(train_baseline),
         "val_baseline": float(val_baseline),
         "test_baseline": float(test_baseline),
         "test_acc": float(test_acc),
         "test_auc": float(test_auc),
         "test_rmse": float(test_rmse),
+        "seed": int(seed),
     }
+    return (metrics, model) if return_model else metrics
 
 
 def train(
@@ -295,6 +335,7 @@ def train(
     dropout: float = 0.2,
     lr_patience: int = 3,
     early_stop_patience: int = 5,
+    seed: int = 42,
 ) -> None:
     splits, _ = load_and_split(npz_path)
     train_feat, train_lab = splits["train"]
@@ -322,6 +363,7 @@ def train(
         lr_patience,
         early_stop_patience,
         verbose=True,
+        seed=seed,
     )
 
 
@@ -343,6 +385,7 @@ if __name__ == "__main__":
     parser.add_argument("--dropout", type=float, default=0.2)
     parser.add_argument("--lr_patience", type=int, default=3)
     parser.add_argument("--early_stop_patience", type=int, default=5)
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     train(
@@ -356,4 +399,5 @@ if __name__ == "__main__":
         args.dropout,
         args.lr_patience,
         args.early_stop_patience,
+        args.seed,
     )
